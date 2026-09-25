@@ -231,6 +231,30 @@ def build_pandapower_net(
     return net
 
 
+def update_household_loads(
+    net, feeder, household_load_kw: dict[str, float], power_factor: float = DEFAULT_POWER_FACTOR
+) -> None:
+    """Mutate an existing net's asymmetric_load table in place for a new
+    interval's household loads, instead of rebuilding the whole net via
+    build_pandapower_net() — reconstructing a ~160-bus net from scratch
+    costs ~1s in this pandapower version, which is fine once but far too
+    slow to repeat per forecast interval."""
+    q_factor = np.tan(np.arccos(power_factor))
+    bus_by_load_name = dict(zip(feeder.household["id"], feeder.household["bus_id"]))
+    phase_by_load_name = dict(zip(feeder.household["id"], feeder.household["phase"]))
+    load_idx_by_name = dict(zip(net.asymmetric_load["name"], net.asymmetric_load.index))
+
+    for hh_id, load_idx in load_idx_by_name.items():
+        p_kw = household_load_kw.get(bus_by_load_name[hh_id], 0.0)
+        active_letter = PHASE_LETTER[phase_by_load_name[hh_id]]
+        for letter in ("a", "b", "c"):
+            on_this_phase = letter == active_letter
+            net.asymmetric_load.at[load_idx, f"p_{letter}_mw"] = p_kw / 1000.0 if on_this_phase else 0.0
+            net.asymmetric_load.at[load_idx, f"q_{letter}_mvar"] = (
+                p_kw * q_factor / 1000.0 if on_this_phase else 0.0
+            )
+
+
 def run_power_flow(net) -> None:
     pp.reset_results(net, mode="pf_3ph")
     runpp_3ph(net)
