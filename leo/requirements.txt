@@ -1,0 +1,20 @@
+# Person A local dev environment (world/, gateway/, cloud/settlement, eval/).
+# python3 -m venv .venv && source .venv/bin/activate && pip install -r requirements.txt
+#
+# Service containers (Day 1 afternoon, Person B) get their own
+# per-service requirements once the Dockerfiles land.
+
+networkx==3.7
+numpy==2.4.6
+pandas==2.3.3
+scipy==1.18.1
+PyYAML==6.0.3
+
+# world/feeder.py
+osmnx==2.1.1
+shapely==2.1.2
+pandapower==3.5.5
+
+# contracts validation, DB access for local testing
+jsonschema==4.26.0
+psycopg2-binary==2.9.13

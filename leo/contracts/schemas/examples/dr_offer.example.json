@@ -1,0 +1,12 @@
+{
+  "run_id": "normal",
+  "event_id": "EVT-2026-09-25-R-1900",
+  "household_id": "HH-0031",
+  "level": 0.5,
+  "predicted_kwh": 1.2,
+  "expected_payment_paise": 1400,
+  "is_holdout": false,
+  "channel": "sms",
+  "message": "Earn about Rs 14 if you switch off your cooler 7-9 pm tonight.",
+  "window": ["2026-09-25T19:00:00Z", "2026-09-25T21:00:00Z"]
+}

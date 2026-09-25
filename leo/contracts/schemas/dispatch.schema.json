@@ -1,0 +1,20 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "leo:dispatch",
+  "type": "object",
+  "required": ["run_id","block_id","ts_end","setpoint_kw",
+               "actual_kw","soc_after","mode"],
+  "additionalProperties": false,
+  "properties": {
+    "run_id":         {"type": "string"},
+    "block_id":       {"type": "string"},
+    "ts_end":         {"type": "string", "format": "date-time"},
+    "setpoint_kw":    {"type": "number"},
+    "actual_kw":      {"type": "number"},
+    "soc_after":      {"type": "number", "minimum": 0, "maximum": 1},
+    "mode":           {"enum": ["idle","normal","pre_outage",
+                                "backup","restoration"]},
+    "rule_triggered": {"type": ["string","null"],
+                       "enum": ["undervoltage","overvoltage",null]}
+  }
+}

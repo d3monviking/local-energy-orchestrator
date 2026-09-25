@@ -1,0 +1,23 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "leo:dr_offer",
+  "type": "object",
+  "required": ["run_id","event_id","household_id","level",
+               "predicted_kwh","is_holdout","channel","message"],
+  "additionalProperties": false,
+  "properties": {
+    "run_id":        {"type": "string"},
+    "event_id":      {"type": "string"},
+    "household_id":  {"type": "string"},
+    "level":         {"enum": [0, 0.25, 0.5, 0.75]},
+    "predicted_kwh": {"type": "number", "minimum": 0},
+    "expected_payment_paise": {"type": "integer", "minimum": 0},
+    "is_holdout":    {"type": "boolean"},
+    "channel":       {"enum": ["sms","app","ivr"]},
+    "message":       {"type": "string", "maxLength": 320},
+    "window": {
+      "type": "array", "minItems": 2, "maxItems": 2,
+      "items": {"type": "string", "format": "date-time"}
+    }
+  }
+}

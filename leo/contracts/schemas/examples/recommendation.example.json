@@ -1,0 +1,13 @@
+{
+  "rec_id": "R-2026-09-25-017",
+  "dt_id": "DT-0417",
+  "phase": "R",
+  "window": ["2026-09-25T19:00:00+05:30", "2026-09-25T21:00:00+05:30"],
+  "issue": "forecast_overload",
+  "severity": "high",
+  "residual_gap_kw": 6.5,
+  "local_actions": ["battery_discharge_12kW", "dr_offers_18"],
+  "recommended_action": "rebalance_phase_load",
+  "evidence": {"forecast_p90_kw": 41.2, "rating_kw": 35.0, "sensor_trace_url": "https://example.invalid/traces/DT-0417/R"},
+  "status": "open"
+}

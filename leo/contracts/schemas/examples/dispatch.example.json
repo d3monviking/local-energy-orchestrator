@@ -1,0 +1,10 @@
+{
+  "run_id": "normal",
+  "block_id": "BATT-R",
+  "ts_end": "2026-09-25T19:15:00Z",
+  "setpoint_kw": 3.5,
+  "actual_kw": 3.4,
+  "soc_after": 0.62,
+  "mode": "normal",
+  "rule_triggered": "undervoltage"
+}

@@ -1,0 +1,39 @@
+# World-builder configuration. Read by world/build.py.
+# Section 7.1 / §9.2 of the Build Specification.
+
+neighbourhood:
+  name: "Hoskote, Bengaluru Rural district, Karnataka"
+  bbox: [77.7930, 13.0688, 77.7955, 13.0710]   # [min_lon, min_lat, max_lon, max_lat]
+  centroid_lat: 13.0700
+  centroid_lon: 77.7942
+  osm_cache: "world/data/hoskote_raw.osm"      # raw extract via OSM API, see world/feeder.py
+  dt_id: "DT-0417"
+  transformer_kva: 100
+  nominal_v_ln: 250.0
+  v_limit_pct: 6.0       # (verify) Karnataka supply code
+
+households:
+  count: 60
+  shares:
+    has_pv: 0.25
+    has_ac: 0.20
+    has_cooler: 0.35
+    has_pump: 0.15
+    has_inverter: 0.10
+    is_business: 0.10
+
+battery_blocks:
+  - {phase: R, capacity_kwh: 15, power_kw: 7.5}
+  - {phase: Y, capacity_kwh: 15, power_kw: 7.5}
+  - {phase: B, capacity_kwh: 15, power_kw: 7.5}
+
+sim:
+  date_start: "2025-09-25"
+  date_end: "2026-09-25"
+  seed: 42
+
+outages:
+  esmi_rate_per_year: null   # fitted from Prayas ESMI stats for the region
+
+sensors:
+  count: 6   # 3 busbar (one per phase) + 3 far-end (one per phase)

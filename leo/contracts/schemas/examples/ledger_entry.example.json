@@ -1,0 +1,14 @@
+{
+  "run_id": "normal",
+  "household_id": "HH-0031",
+  "date": "2026-09-25",
+  "entry_type": "dr_incentive",
+  "deficit_kwh": null,
+  "matched_kwh": null,
+  "amount_paise": 1400,
+  "period_budget_paise": 500000,
+  "payout_scaling_factor": 1.0,
+  "linked_event_id": "EVT-2026-09-25-R-1900",
+  "rank_snapshot": null,
+  "running_balance_paise": 1400
+}

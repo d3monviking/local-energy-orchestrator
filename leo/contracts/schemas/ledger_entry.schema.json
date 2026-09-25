@@ -1,0 +1,25 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "leo:ledger_entry",
+  "type": "object",
+  "required": ["run_id","household_id","date","entry_type",
+               "amount_paise","period_budget_paise",
+               "payout_scaling_factor","running_balance_paise"],
+  "additionalProperties": false,
+  "properties": {
+    "run_id":       {"type": "string"},
+    "household_id": {"type": "string"},
+    "date":         {"type": "string", "format": "date"},
+    "entry_type":   {"enum": ["dr_incentive","absorption_payment",
+                              "discharge_rebate","backup_fee"]},
+    "deficit_kwh":  {"type": ["number","null"], "minimum": 0},
+    "matched_kwh":  {"type": ["number","null"], "minimum": 0},
+    "amount_paise": {"type": "integer", "minimum": 0},
+    "period_budget_paise":   {"type": "integer", "minimum": 0},
+    "payout_scaling_factor": {"type": "number",
+                              "minimum": 0, "maximum": 1},
+    "linked_event_id":       {"type": ["string","null"]},
+    "rank_snapshot":         {"type": ["integer","null"]},
+    "running_balance_paise": {"type": "integer"}
+  }
+}

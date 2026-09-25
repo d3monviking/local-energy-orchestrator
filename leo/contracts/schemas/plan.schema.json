@@ -1,0 +1,34 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "leo:plan",
+  "type": "object",
+  "required": ["run_id","plan_date","phase","planner","intervals",
+               "reserve_floor_kwh","status"],
+  "additionalProperties": false,
+  "properties": {
+    "run_id":    {"type": "string"},
+    "plan_date": {"type": "string", "format": "date"},
+    "phase":     {"enum": ["R","Y","B"]},
+    "planner":   {"enum": ["cvx","rules"]},
+    "intervals": {
+      "type": "array", "minItems": 96, "maxItems": 96,
+      "items": {
+        "type": "object",
+        "required": ["ts_end","setpoint_kw","mode"],
+        "properties": {
+          "ts_end":      {"type": "string", "format": "date-time"},
+          "setpoint_kw": {"type": "number"},
+          "mode":        {"enum": ["idle","normal","pre_outage",
+                                   "backup","restoration"]},
+          "soc_target":  {"type": "number", "minimum": 0, "maximum": 1}
+        }
+      }
+    },
+    "reserve_floor_kwh": {"type": "number", "minimum": 0},
+    "expected_dr_kw":    {"type": "object",
+                          "additionalProperties": {"type": "number"}},
+    "status":            {"enum": ["draft","approved"]},
+    "approved_by":       {"type": ["string","null"]},
+    "approved_at":       {"type": ["string","null"], "format": "date-time"}
+  }
+}

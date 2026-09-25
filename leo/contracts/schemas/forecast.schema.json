@@ -1,0 +1,28 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "leo:forecast",
+  "type": "object",
+  "required": ["run_id","model","model_version","dt_id","phase",
+               "interval_end","run_time","p10_kw","p50_kw","p90_kw","inputs_as_of"],
+  "additionalProperties": false,
+  "properties": {
+    "run_id":        {"type": "string"},
+    "model":         {"enum": ["load_v3","pv_v3"]},
+    "model_version": {"type": "string"},
+    "dt_id":         {"type": "string"},
+    "phase":         {"enum": ["R","Y","B"]},
+    "interval_end":  {"type": "string", "format": "date-time"},
+    "run_time":      {"type": "string", "format": "date-time"},
+    "p10_kw":        {"type": "number"},
+    "p50_kw":        {"type": "number"},
+    "p90_kw":        {"type": "number"},
+    "inputs_as_of": {
+      "type": "object",
+      "required": ["meter_data","weather_run"],
+      "properties": {
+        "meter_data":  {"type": "string", "format": "date"},
+        "weather_run": {"type": "string", "format": "date-time"}
+      }
+    }
+  }
+}

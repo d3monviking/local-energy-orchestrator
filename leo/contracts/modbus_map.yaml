@@ -1,0 +1,40 @@
+# LEO Modbus register map. Frozen Day 1. Identical across unit IDs 1, 2, 3.
+# Holding registers, SunSpec-inspired but simplified.
+# See Build Specification v1.0 §11.4.
+
+unit_ids: [1, 2, 3]          # one per phase: 1=R, 2=Y, 3=B
+endianness: big
+word_order: high_first
+
+read:
+  40000: {name: soc_pct_x10,        type: uint16, scale: 0.1,  unit: "%"}
+  40001: {name: active_power_w,     type: int16,  scale: 1,    unit: W,
+          note: "positive = discharge, negative = charge"}
+  40002: {name: terminal_voltage_x10, type: uint16, scale: 0.1, unit: V}
+  40003: {name: grid_present,       type: uint16, values: {0: absent, 1: present}}
+  40004: {name: alarm_bits,         type: uint16, bits:
+           {0: bms_limit, 1: over_temp, 2: under_voltage,
+            3: over_voltage, 4: comms_loss}}
+  40005: {name: backup_port_w,      type: uint16, scale: 1, unit: W}
+  40006: {name: soc_min_pct_x10,    type: uint16, scale: 0.1, unit: "%"}
+  40007: {name: soc_max_pct_x10,    type: uint16, scale: 0.1, unit: "%"}
+
+write:
+  40010: {name: mode,          type: uint16,
+          values: {0: idle, 1: follow_setpoint, 2: backup}}
+  40011: {name: setpoint_w,    type: int16, unit: W,
+          note: "positive = discharge, negative = charge"}
+  40012: {name: watchdog_s,    type: uint16, unit: s, default: 60}
+
+behaviour:
+  watchdog: >
+    If no write to 40011 occurs within watchdog_s, the block reverts to
+    mode 0 (idle). Implement this in the mock: it is real inverter
+    behaviour and the orchestrator must handle it.
+  bms_override: >
+    The BMS may clip or refuse any setpoint. actual_kw in telemetry is
+    authoritative, not the commanded setpoint. Always log both.
+  anti_islanding: >
+    On grid loss the block opens its grid relay automatically and serves
+    only the backup port. This is not an orchestrator decision; the
+    orchestrator observes grid_present going to 0 and adjusts accounting.

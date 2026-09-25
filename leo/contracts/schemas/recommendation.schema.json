@@ -1,0 +1,28 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "leo:recommendation",
+  "type": "object",
+  "required": ["rec_id","dt_id","window","issue","severity",
+               "recommended_action","status"],
+  "additionalProperties": false,
+  "properties": {
+    "rec_id":   {"type": "string", "pattern": "^R-\\d{4}-\\d{2}-\\d{2}-\\d{3}$"},
+    "dt_id":    {"type": "string"},
+    "phase":    {"enum": ["R","Y","B", null]},
+    "window":   {"type": "array", "minItems": 2, "maxItems": 2,
+                 "items": {"type": "string", "format": "date-time"}},
+    "issue":    {"enum": ["forecast_overload","forecast_undervoltage",
+                          "forecast_overvoltage","outage",
+                          "recurring_phase_imbalance","transformer_near_rating"]},
+    "severity": {"enum": ["low","medium","high"]},
+    "residual_gap_kw": {"type": ["number","null"]},
+    "local_actions":   {"type": "array", "items": {"type": "string"}},
+    "recommended_action": {
+      "enum": ["rebalance_phase_load","tap_change_raise","tap_change_lower",
+               "switch_capacitors","load_transfer","upgrade_planning",
+               "review_inverter_voltage_settings","crew_dispatch",
+               "flisr_scope","protect_critical_premises"]},
+    "evidence": {"type": "object"},
+    "status":   {"enum": ["open","acknowledged","dispatched","resolved"]}
+  }
+}
