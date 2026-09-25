@@ -20,6 +20,9 @@ numba==0.67.0  # JIT for pandapower's power-flow core; ~5x faster runpp_3ph solv
 # world/weather.py
 pyarrow==25.0.1  # parquet cache for the fetched weather series
 
+# world/pv_truth.py
+pvlib==0.15.2
+
 # contracts validation, DB access for local testing
 jsonschema==4.26.0
 psycopg2-binary==2.9.13
