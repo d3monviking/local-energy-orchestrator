@@ -14,6 +14,7 @@ PyYAML==6.0.3
 osmnx==2.1.1
 shapely==2.1.2
 pandapower==3.5.5
+numba==0.67.0  # JIT for pandapower's power-flow core; ~5x faster runpp_3ph solves
 
 # contracts validation, DB access for local testing
 jsonschema==4.26.0
