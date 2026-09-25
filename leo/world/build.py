@@ -216,7 +216,10 @@ def build(scenario: dict | None = None, skip_db: bool = False) -> dict:
     ))
 
     print("solving the IRT trajectory library...")
-    irt_library = build_library(feeder.household, true_load, true_pv, scenario["battery_blocks"], rng)
+    irt_library = build_library(
+        feeder.household, true_load, true_pv, scenario["battery_blocks"], rng,
+        temperature_c=weather_15min["temperature_c"].to_numpy(),
+    )
 
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     true_load.to_parquet(OUTPUT_DIR / "true_load.parquet")

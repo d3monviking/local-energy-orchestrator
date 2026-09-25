@@ -26,6 +26,9 @@ pvlib==0.15.2
 # world/irt_library.py, gateway/orchestrator/planner_cvx.py
 cvxpy==1.9.3
 
+# gateway/orchestrator/irt.py
+holidays==0.105  # India festival calendar for the festival-flag feature
+
 # contracts validation, DB access for local testing
 jsonschema==4.26.0
 psycopg2-binary==2.9.13
