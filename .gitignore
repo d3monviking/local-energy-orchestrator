@@ -3,3 +3,4 @@ arch/
 leo/.venv/
 leo/**/__pycache__/
 leo/world/data/generated/
+leo/cloud/artifacts/
