@@ -29,6 +29,10 @@ cvxpy==1.9.3
 # gateway/orchestrator/irt.py
 holidays==0.105  # India festival calendar for the festival-flag feature
 
+# gateway/forecast/load_model.py
+lightgbm==4.7.0
+scikit-learn==1.9.1  # lightgbm's sklearn wrapper depends on it
+
 # contracts validation, DB access for local testing
 jsonschema==4.26.0
 psycopg2-binary==2.9.13
