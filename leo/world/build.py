@@ -5,9 +5,12 @@ Owner A. See Build Specification v1.0 §7.1, §2.3.
 
 Runs every world/ generator in dependency order and:
   - writes the static registry (neighbourhood, bus, line, household,
-    household_truth, appliance, sensor, battery_block) to Postgres, so
-    gateway/cloud can query it directly — same schema in prototype and
-    deployment;
+    household_truth, appliance, sensor, battery_block, premise_backup) to
+    Postgres, so gateway/cloud can query it directly — same schema in
+    prototype and deployment. premise_backup registration itself is
+    gateway/outage.py's function (§C9 owns backup allocation, and the
+    registration is a pure function of the household registry with no
+    runtime dependency), just written here alongside everything else;
   - writes the truth-side artefacts (true load, true PV, outage schedule,
     IRT trajectory library) to world/data/generated/ as Parquet. These are
     NOT DDL tables — sim/measure.py (not yet built) is what turns true
@@ -37,6 +40,7 @@ from world.pv_truth import assign_pv_truth_params, generate_true_pv
 from world.outages import generate_outage_schedule, to_dataframe as outages_to_dataframe
 from world.irt_library import build_library
 from world.weather import fetch_scenario_weather, to_15min
+from gateway.outage import register_backup_premises
 
 MODULE_DIR = Path(__file__).parent
 OUTPUT_DIR = MODULE_DIR / "data" / "generated"
@@ -79,6 +83,12 @@ def _clear_existing_world(conn, dt_id: str, battery_ids: list[str]) -> None:
         (dt_id,),
     )
     cur.execute(
+        """DELETE FROM premise_backup WHERE household_id IN
+           (SELECT id FROM household WHERE bus_id IN
+               (SELECT id FROM bus WHERE neighbourhood_id = %s))""",
+        (dt_id,),
+    )
+    cur.execute(
         "DELETE FROM sensor WHERE bus_id IN (SELECT id FROM bus WHERE neighbourhood_id = %s)", (dt_id,)
     )
     cur.execute(
@@ -101,8 +111,9 @@ def write_static_registry(
     conn, scenario: dict, feeder, appliances: pd.DataFrame, household_truth: pd.DataFrame,
 ) -> None:
     """Neighbourhood, bus, line, household, household_truth, appliance,
-    sensor, battery_block — everything a DISCOM registry would actually
-    hold plus the hidden truth, written fresh on every world.build run.
+    sensor, battery_block, premise_backup — everything a DISCOM registry
+    would actually hold plus the hidden truth, written fresh on every
+    world.build run.
     """
     nb = scenario["neighbourhood"]
     battery_ids = [f"BATT-{b['phase']}" for b in scenario["battery_blocks"]]
@@ -157,6 +168,13 @@ def write_static_registry(
              None if pd.isna(row["pv_azimuth_deg"]) else row["pv_azimuth_deg"],
              None if pd.isna(row["pv_soiling"]) else row["pv_soiling"],
              bool(row["has_inverter"])),
+        )
+
+    premise_backup = register_backup_premises(feeder.household)
+    for _, row in premise_backup.iterrows():
+        cur.execute(
+            "INSERT INTO premise_backup (household_id, priority_class, max_current_a) VALUES (%s,%s,%s)",
+            (row["household_id"], int(row["priority_class"]), row["max_current_a"]),
         )
 
     for _, row in appliances.iterrows():
