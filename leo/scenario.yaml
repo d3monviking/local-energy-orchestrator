@@ -13,7 +13,10 @@ neighbourhood:
   v_limit_pct: 6.0       # (verify) Karnataka supply code
 
 households:
-  count: 60
+  count: 150   # raised from 60: models a DT that outgrew its original sizing via
+               # organic consumer growth without augmentation. 120 got within 0.5%
+               # of the voltage limit at the year's peak demand; 150 (near the max
+               # the cached OSM extract's 186 buildings support) reliably crosses it.
   shares:
     has_pv: 0.25
     has_ac: 0.20

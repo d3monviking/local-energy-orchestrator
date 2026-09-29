@@ -109,8 +109,8 @@ def run_arm(
         # until the repair window elapses.
         for phase in ["R", "Y", "B"]:
             if state.trip_until[phase] is not None and ts < state.trip_until[phase]:
-                for hh_id in feeder.household.loc[feeder.household["phase"] == phase, "id"]:
-                    loads[hh_id] = 0.0
+                for bus_id in feeder.household.loc[feeder.household["phase"] == phase, "bus_id"]:
+                    loads[bus_id] = 0.0
             elif state.trip_until[phase] is not None and ts >= state.trip_until[phase]:
                 state.trip_until[phase] = None
                 state.consecutive_overload[phase] = 0
@@ -268,6 +268,10 @@ if __name__ == "__main__":
     true_pv = generate_true_pv(feeder.household, pv_truth, lat, lon, weather_15min)
     pv_by_hh = true_pv.reindex(columns=feeder.household["id"], fill_value=0.0)
     household_load_full_kw = (true_load - pv_by_hh[true_load.columns].fillna(0.0)).clip(lower=0.0)
+    # update_household_loads() (gateway/network_model.py) requires bus_id
+    # keys, not household_id — true_load/true_pv are naturally keyed by
+    # household_id, so remap columns here rather than at every call site.
+    household_load_full_kw.columns = feeder.household.set_index("id").loc[household_load_full_kw.columns, "bus_id"]
 
     outages_df = outages_to_dataframe(generate_outage_schedule(
         scenario["sim"]["date_start"], scenario["sim"]["date_end"],

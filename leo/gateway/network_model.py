@@ -244,6 +244,21 @@ def update_household_loads(
     phase_by_load_name = dict(zip(feeder.household["id"], feeder.household["phase"]))
     load_idx_by_name = dict(zip(net.asymmetric_load["name"], net.asymmetric_load.index))
 
+    # This dict MUST be keyed by bus_id, not household_id — a caller that
+    # gets this wrong silently applies zero load everywhere (every key
+    # lookup below just misses and defaults to 0.0), which looks like a
+    # perfectly normal, violation-free power flow rather than an error.
+    # Confirmed: this exact mistake in an earlier eval/run_arms.py made a
+    # 30-day evaluation run entirely unloaded. Fail loudly instead.
+    known_bus_ids = set(bus_by_load_name.values())
+    if household_load_kw and not (set(household_load_kw.keys()) & known_bus_ids):
+        raise ValueError(
+            "update_household_loads: none of the supplied keys match a household bus_id "
+            "— this dict is almost certainly keyed by household_id instead. "
+            f"Expected keys like {list(known_bus_ids)[:2]}, got keys like "
+            f"{list(household_load_kw.keys())[:2]}"
+        )
+
     for hh_id, load_idx in load_idx_by_name.items():
         p_kw = household_load_kw.get(bus_by_load_name[hh_id], 0.0)
         active_letter = PHASE_LETTER[phase_by_load_name[hh_id]]
