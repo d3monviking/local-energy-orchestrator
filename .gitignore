@@ -1,5 +1,6 @@
 arch/
 
+.venv/
 leo/.venv/
 leo/**/__pycache__/
 leo/world/data/generated/

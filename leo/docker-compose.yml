@@ -1,9 +1,10 @@
-version: "3.9"
-
 services:
   postgres:
     image: postgres:16
-    ports: ["5432:5432"]
+    # host port 5433: avoids clashing with a local postgresql install on
+    # the default 5432. Services inside the compose network still reach
+    # it at postgres:5432.
+    ports: ["5433:5432"]
     environment:
       POSTGRES_DB: leo
       POSTGRES_USER: leo
@@ -17,37 +18,58 @@ services:
     ports: ["1883:1883"]
 
   clock:
-    build: ./sim
-    command: uvicorn clock:app --host 0.0.0.0 --port 8010
+    build: { context: ., dockerfile: sim/Dockerfile }
     ports: ["8010:8010"]
+    environment:
+      MQTT_HOST: mosquitto
+    depends_on: [mosquitto]
 
   mock-ies:
-    build: ./mocks
-    command: uvicorn ies_server:app --host 0.0.0.0 --port 8011
+    build: { context: ., dockerfile: mocks/Dockerfile }
+    command: ["uvicorn", "ies_server:app", "--host", "0.0.0.0", "--port", "8011"]
     ports: ["8011:8011"]
+    environment:
+      CLOCK_URL: http://clock:8010
+      POSTGRES_HOST: postgres
     depends_on: [postgres, clock]
 
   mock-modbus:
-    build: ./mocks
-    command: python modbus_battery.py
+    build: { context: ., dockerfile: mocks/Dockerfile }
+    command: ["python", "modbus_battery.py"]
     ports: ["5020:5020"]
+    environment:
+      CLOCK_URL: http://clock:8010
     depends_on: [clock]
 
+  mock-modbus-meters:
+    build: { context: ., dockerfile: mocks/Dockerfile }
+    command: ["python", "modbus_meters.py"]
+    ports: ["5021:5021"]
+    environment:
+      POSTGRES_HOST: postgres
+    depends_on: [postgres]
+
   mock-sms:
-    build: ./mocks
-    command: uvicorn sms_service:app --host 0.0.0.0 --port 8012
+    build: { context: ., dockerfile: mocks/Dockerfile }
+    command: ["uvicorn", "sms_service:app", "--host", "0.0.0.0", "--port", "8012"]
     ports: ["8012:8012"]
+    environment:
+      CLOCK_URL: http://clock:8010
+    depends_on: [clock]
 
   gateway:
-    build: ./gateway
-    command: uvicorn ingest:app --host 0.0.0.0 --port 8020
+    build: { context: ., dockerfile: gateway/Dockerfile }
     ports: ["8020:8020"]
+    environment:
+      POSTGRES_HOST: postgres
+      MQTT_HOST: mosquitto
     depends_on: [postgres, mosquitto, mock-modbus, clock]
 
   cloud:
-    build: ./cloud
-    command: uvicorn api:app --host 0.0.0.0 --port 8030
+    build: { context: ., dockerfile: cloud/Dockerfile }
     ports: ["8030:8030"]
+    environment:
+      POSTGRES_HOST: postgres
     depends_on: [postgres, gateway]
 
   web:

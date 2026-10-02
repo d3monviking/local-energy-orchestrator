@@ -1,0 +1,5 @@
+# Additions to the root requirements.txt for the cloud service container
+# (cloud/api.py's FastAPI app). Owner B.
+fastapi==0.118.0
+uvicorn[standard]==0.37.0
+asyncpg==0.31.0

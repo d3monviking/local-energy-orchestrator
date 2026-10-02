@@ -1,0 +1,6 @@
+# sim/ service container (clock). Owner B.
+fastapi==0.118.0
+uvicorn[standard]==0.37.0
+paho-mqtt==2.1.0
+pydantic==2.11.7
+requests==2.32.3

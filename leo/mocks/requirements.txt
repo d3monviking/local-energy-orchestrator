@@ -1,0 +1,8 @@
+# mocks/ service container (ies_server, modbus_battery, modbus_meters,
+# sms_service). Owner B.
+fastapi==0.118.0
+uvicorn[standard]==0.37.0
+pydantic==2.11.7
+requests==2.32.3
+pymodbus==3.11.3
+psycopg2-binary==2.9.13

@@ -1,0 +1,7 @@
+# Additions to the root requirements.txt for the gateway service container
+# (gateway/ingest.py's FastAPI app, MQTT + Modbus polling). Owner B.
+fastapi==0.118.0
+uvicorn[standard]==0.37.0
+paho-mqtt==2.1.0
+pymodbus==3.11.3
+asyncpg==0.31.0
