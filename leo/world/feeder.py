@@ -89,7 +89,11 @@ def load_scenario(path: Path = DEFAULT_SCENARIO_PATH) -> dict:
         return yaml.safe_load(f)
 
 
-def load_osm(osm_path: Path = DEFAULT_OSM_PATH) -> tuple[nx.Graph, "pd.DataFrame"]:
+def load_osm(
+    osm_path: Path = DEFAULT_OSM_PATH,
+    bbox: Optional[tuple[float, float, float, float]] = None,
+    bbox_buffer_m: float = 75.0,
+) -> tuple[nx.Graph, "pd.DataFrame"]:
     """Load the drivable street graph and building footprints from a cached
     OSM XML extract (see world/data/hoskote_raw.osm — a real bbox in
     Hoskote, Bengaluru Rural district, downloaded via the OSM API).
@@ -97,6 +101,18 @@ def load_osm(osm_path: Path = DEFAULT_OSM_PATH) -> tuple[nx.Graph, "pd.DataFrame
     Returns the largest connected component of the street graph as an
     undirected simple graph with a `length` (m) attribute per edge, and a
     GeoDataFrame of building footprint polygons.
+
+    `bbox` (min_lon, min_lat, max_lon, max_lat), typically
+    scenario["neighbourhood"]["bbox"], clips nodes outside it (plus
+    `bbox_buffer_m` slack) before picking the largest connected component.
+    A bbox query against the OSM API returns *complete ways*, including
+    every node on a way that merely clips the box's edge — a rural road
+    passing near the corner of a tiny neighbourhood bbox can drag its
+    entire multi-kilometre length into the graph. Confirmed directly: an
+    unclipped extract here produced an 11.3km edge reaching ~7km outside
+    a ~280m x 244m bbox, which no transformer-sited battery could ever
+    compensate for. Clipping first means the largest-connected-component
+    selection only ever sees the locally relevant network.
     """
     multidigraph = ox.graph_from_xml(str(osm_path), simplify=True, retain_all=True)
     multigraph = ox.convert.to_undirected(multidigraph)
@@ -111,6 +127,18 @@ def load_osm(osm_path: Path = DEFAULT_OSM_PATH) -> tuple[nx.Graph, "pd.DataFrame
                 graph.edges[u, v].update(length=length, geometry=data.get("geometry"))
         else:
             graph.add_edge(u, v, length=length, geometry=data.get("geometry"))
+
+    if bbox is not None:
+        min_lon, min_lat, max_lon, max_lat = bbox
+        lat0 = float(np.mean([data["y"] for _, data in graph.nodes(data=True)]))
+        lat_buffer_deg = bbox_buffer_m / METRES_PER_DEGREE_LAT
+        lon_buffer_deg = bbox_buffer_m / _metres_per_degree_lon(lat0)
+        out_of_bounds = [
+            n for n, data in graph.nodes(data=True)
+            if not (min_lon - lon_buffer_deg <= data["x"] <= max_lon + lon_buffer_deg
+                    and min_lat - lat_buffer_deg <= data["y"] <= max_lat + lat_buffer_deg)
+        ]
+        graph.remove_nodes_from(out_of_bounds)
 
     largest_cc = max(nx.connected_components(graph), key=len)
     graph = graph.subgraph(largest_cc).copy()
@@ -228,13 +256,19 @@ def attach_households(
             pole_counter += 1
             pole_id = f"POLE-{pole_counter}"
             edge_geom = _edge_geometry(tree, u, v)
-            full_length = edge_geom.length
-            len_u = edge_geom.project(proj_pt)
+            # edge_geom.length/.project() are in the geometry's native CRS
+            # (degrees), not metres — fine for frac_u, a dimensionless
+            # ratio, but NOT a length. The split edges' lengths must come
+            # from this edge's own already-metres-converted `length`
+            # attribute, scaled by that ratio.
+            full_length_deg = edge_geom.length
+            len_u_deg = edge_geom.project(proj_pt)
+            full_length_m = tree[u][v]["length"]
             tree.add_node(pole_id, x=proj_pt.x, y=proj_pt.y)
             tree.remove_edge(u, v)
-            frac_u = len_u / full_length if full_length > 0 else 0.5
-            tree.add_edge(u, pole_id, length=full_length * frac_u)
-            tree.add_edge(pole_id, v, length=full_length * (1 - frac_u))
+            frac_u = len_u_deg / full_length_deg if full_length_deg > 0 else 0.5
+            tree.add_edge(u, pole_id, length=full_length_m * frac_u)
+            tree.add_edge(pole_id, v, length=full_length_m * (1 - frac_u))
             attach_node = pole_id
 
         hh_bus_id = f"HH-BUS-{i:03d}"
@@ -424,7 +458,7 @@ def build_feeder(
     rng = random.Random(seed)
     n_households = scenario["households"]["count"]
 
-    graph, buildings = load_osm(osm_path)
+    graph, buildings = load_osm(osm_path, bbox=tuple(scenario["neighbourhood"]["bbox"]))
     root = pick_transformer_node(graph, buildings)
     tree = build_mst(graph, root)
     tree, attachments = attach_households(tree, buildings, n_households, rng)
