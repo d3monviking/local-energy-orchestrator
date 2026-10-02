@@ -12,6 +12,7 @@ state to record and reconcile later.
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, field
 from datetime import date as date_type
 from typing import Optional
@@ -72,6 +73,19 @@ class LedgerWriter:
         return self.running_balance_paise.get(household_id, 0)
 
 
+def _nan_to_none(value):
+    """A column that's None for some rows and an int/float for others
+    (e.g. concatenating a stream-1 batch, which never sets rank_snapshot,
+    with a stream-2 batch, which always does) gets silently promoted by
+    pandas to float64 with NaN standing in for None. psycopg2 writes that
+    NaN literally, and Postgres rejects it for an INT/BIGINT column with
+    "integer out of range" — a confusing error for what's really just a
+    missing value. Confirmed by a caller combining exactly those two
+    streams into one DataFrame before calling this function.
+    """
+    return None if isinstance(value, float) and math.isnan(value) else value
+
+
 def write_ledger_rows(conn, run_id: str, ledger_df: pd.DataFrame) -> None:
     """Persist a batch of ledger rows to Postgres, matching the `ledger`
     DDL table exactly."""
@@ -83,9 +97,9 @@ def write_ledger_rows(conn, run_id: str, ledger_df: pd.DataFrame) -> None:
                    rank_snapshot, running_balance_paise)
                VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
             (run_id, row["household_id"], row["date"], row["entry_type"],
-             row.get("deficit_kwh"), row.get("matched_kwh"), int(row["amount_paise"]),
-             int(row["period_budget_paise"]), row["payout_scaling_factor"], row.get("linked_event_id"),
-             row.get("rank_snapshot"), int(row["running_balance_paise"])),
+             _nan_to_none(row.get("deficit_kwh")), _nan_to_none(row.get("matched_kwh")), int(row["amount_paise"]),
+             int(row["period_budget_paise"]), row["payout_scaling_factor"], _nan_to_none(row.get("linked_event_id")),
+             _nan_to_none(row.get("rank_snapshot")), int(row["running_balance_paise"])),
         )
     conn.commit()
     cur.close()
