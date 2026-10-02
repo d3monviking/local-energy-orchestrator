@@ -4,7 +4,7 @@ import { useEffect, useState } from "react";
 import { formatRupees } from "@/lib/format";
 
 const CLOUD_API_URL = process.env.NEXT_PUBLIC_CLOUD_API_URL ?? "http://localhost:8030";
-const HOUSEHOLD_ID = "HH-084"; // matches lib/auth.ts's stub household session
+const HOUSEHOLD_ID = "HH-019"; // matches lib/auth.ts's stub household session
 
 type CitizenSummary = {
   household_id: string;
