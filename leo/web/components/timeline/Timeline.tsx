@@ -255,16 +255,38 @@ export default function Timeline({
                 setPlaying(false);
                 emit(ts);
               }}
+              className="group"
               style={{
                 position: "absolute",
-                left: `calc(${left}% - 3px)`,
-                top: 2,
-                width: 6,
-                height: 6,
-                borderRadius: "50%",
-                background: EVENT_COLOR[ev.kind],
+                left: `calc(${left}% - 5px)`,
+                top: 0,
+                bottom: 0,
+                width: 10,
               }}
-            />
+            >
+              <span
+                style={{
+                  position: "absolute",
+                  left: 4,
+                  top: 0,
+                  bottom: 0,
+                  width: 2,
+                  background: EVENT_COLOR[ev.kind],
+                }}
+              />
+              <span
+                style={{
+                  position: "absolute",
+                  left: 1,
+                  top: 1,
+                  width: 8,
+                  height: 8,
+                  borderRadius: "50%",
+                  background: EVENT_COLOR[ev.kind],
+                  boxShadow: "0 0 0 1px var(--leo-panel)",
+                }}
+              />
+            </button>
           );
         })}
 

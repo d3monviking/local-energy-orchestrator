@@ -75,6 +75,8 @@ export type FeederMapProps = {
   vLimitPct?: number;
   /** bus_ids of households actually on backup power this run — drawn with a distinct ring (§8.2). */
   backupBusIds?: Set<string>;
+  /** phase -> latest dispatch row at the scrubbed ts, for the battery_block tooltip. */
+  liveDispatchByPhase?: Record<string, { actual_kw: number; soc_after: number; mode: string; rule_triggered: string | null }>;
 };
 
 function voltageColor(v: number, nominal: number, limitPct: number): [number, number, number] {
@@ -91,6 +93,7 @@ export default function FeederMap({
   nominalV = 230,
   vLimitPct = 6,
   backupBusIds,
+  liveDispatchByPhase,
 }: FeederMapProps) {
   const [data, setData] = useState<FeederCollection | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -247,15 +250,38 @@ export default function FeederMap({
         </div>
       )}
 
-      {hover?.object && (
-        <div
-          className="absolute rounded-md bg-black/80 text-xs px-2 py-1 pointer-events-none"
-          style={{ left: hover.x + 12, top: hover.y + 12 }}
-        >
-          {hover.object.properties?.feature_type}: {hover.object.properties?.id}
-          {hover.object.properties?.phase && ` · phase ${hover.object.properties.phase}`}
-        </div>
-      )}
+      {hover?.object && (() => {
+        const props = hover.object.properties as FeederProperties;
+        const busId = props.bus_id ?? props.id;
+        const vState = busState?.[busId];
+        const dispatchState = props.feature_type === "battery_block" && props.phase
+          ? liveDispatchByPhase?.[props.phase]
+          : undefined;
+        return (
+          <div
+            className="absolute rounded-md bg-black/80 text-xs px-2 py-1 pointer-events-none flex flex-col gap-0.5"
+            style={{ left: hover.x + 12, top: hover.y + 12 }}
+          >
+            <span>
+              {props.feature_type}: {props.id}
+              {props.phase && ` · phase ${props.phase}`}
+            </span>
+            {vState && (
+              <span className={vState.violation ? "text-[var(--leo-bad)]" : "text-[var(--leo-ok)]"}>
+                {vState.voltage_v.toFixed(1)}V{vState.violation ? " (violation)" : ""}
+              </span>
+            )}
+            {dispatchState && (
+              <span className="text-[var(--leo-text-dim)]">
+                {dispatchState.actual_kw >= 0 ? "discharging" : "charging"} {Math.abs(dispatchState.actual_kw).toFixed(1)}kW ·
+                SoC {(dispatchState.soc_after * 100).toFixed(0)}% · {dispatchState.mode}
+                {dispatchState.rule_triggered && ` · ${dispatchState.rule_triggered}`}
+              </span>
+            )}
+            {props.is_critical && <span className="text-[var(--leo-warn)]">critical premise</span>}
+          </div>
+        );
+      })()}
     </div>
   );
 }
