@@ -75,10 +75,18 @@ PERSONA_PARAMS: dict[str, PersonaParams] = {
     # Price-sensitive-like response (see that persona's comment on why
     # the curve is this steep), but a shop open during the event window
     # can't cut load — captured as a hard blackout, not a logit term.
+    # Blackout ends at 19:00, not 20:00: this scenario's small local
+    # shops (kirana/provision stores, not malls) close by early evening,
+    # and §C9's evening-peak DR window starts at 19:00 IST sharp —
+    # confirmed the previous (9, 20) bound made every business offer in
+    # that window unconditionally unacceptable regardless of incentive
+    # level, which is a different claim than "businesses rarely accept"
+    # and was silently defeating the bandit's own correct decision to
+    # escalate them to paid levels.
     "small_business": PersonaParams(
         base_accept=-2.0, incentive_sensitivity=5.5, heat_sensitivity=0.0,
         fatigue_sensitivity=0.02, reduction_mean_frac=0.30, reduction_std_frac=0.08,
-        blackout_hours=(9, 20),
+        blackout_hours=(9, 19),
     ),
 }
 

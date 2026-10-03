@@ -697,14 +697,29 @@ def main() -> None:
     cur.close()
 
     print("training the DR bandit offline over simulated history...")
-    # alpha=0.6 (Architecture v3.0 §11.2's illustrative value) left the
-    # UCB exploration bonus an order of magnitude larger than the
-    # learned prediction even after 6000 training updates (confirmed:
-    # bonus ~0.6-0.9 vs predicted_kwh ~0.03-0.13), so score() was still
-    # picking almost-pure exploration, which the (1-level) profit
-    # penalty then always resolves to level 0. 0.15 is where the learned
-    # signal actually starts to compete.
-    bandit = LinUCB(alpha=0.15)
+    # Two-phase alpha, not one fixed value. alpha=0.6 (Architecture
+    # v3.0 §11.2's illustrative value) left the UCB exploration bonus an
+    # order of magnitude larger than the learned prediction even after
+    # 6000 training updates (confirmed: bonus ~0.6-0.9 vs predicted_kwh
+    # ~0.03-0.13), so a bandit SERVED at alpha=0.6 picks almost-pure
+    # exploration forever, which the (1-level) profit penalty then
+    # always resolves to level 0.
+    #
+    # But alpha=0.15 for the *training* phase too (confirmed, the
+    # original single-alpha fix) overcorrects into the opposite trap:
+    # is_business is the only feature distinguishing households BEFORE
+    # any engagement history accumulates, so a low exploration bonus
+    # converges almost immediately onto "only businesses are ever worth
+    # a paid level" and stops trying level>0 on anyone else — meaning no
+    # non-business household's own engagement history (offers_received,
+    # past_response_rate, avg_verified_kwh — the signal that's supposed
+    # to let the bandit tell a price_sensitive household apart from a
+    # non_responsive one with an identical feature vector, Build Spec
+    # §5.4) ever gets the chance to diverge. Training wide (0.6) and
+    # serving narrow (0.15) is the standard fix: explore enough during
+    # the 30 offline days to let real per-household response history
+    # form, then exploit that learned signal for the live event.
+    bandit = LinUCB(alpha=0.6)
     # Trains against the REAL target households (their real hidden
     # persona, same as world/households.py assigned — legitimate here,
     # this is simulated past history standing in for a bandit that
@@ -749,6 +764,11 @@ def main() -> None:
             acc["replied"] += int(response.accepted)
             acc["verified_kwh_sum"] += response.verified_kwh
     print("bandit trained.")
+    # Narrow back down for the live decision: theta is already learned,
+    # so the UCB bonus only needs to be large enough to keep adapting,
+    # not large enough to keep randomly trying arms on the one day that
+    # actually gets served to real households and billed.
+    bandit.alpha = 0.15
 
     # The real event starts "rested" (days_since_last_offer reset) since
     # the 30 synthetic training days represent history before this

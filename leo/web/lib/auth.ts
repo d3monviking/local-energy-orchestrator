@@ -25,14 +25,16 @@ const COOKIE_NAME = "leo_session";
 const STUB_USERS: Record<string, { password: string; session: Session }> = {
   operator: { password: "operator", session: { role: "operator", name: "Operator" } },
   discom: { password: "discom", session: { role: "discom", name: "DISCOM" } },
-  // HH-019: a real household from the recorded run (phase R, not
-  // critical) with the richest earnings story in this run — both
-  // absorption and discharge-rebate stream payouts. The earlier
-  // "HH-0031" placeholder didn't match the real 3-digit household_id
-  // format and resolved to nothing; HH-084 resolved but settled to
-  // zero earnings in this run's single DR event (its only offer was
-  // never replied), leaving the Earnings tab empty for the demo.
-  household: { password: "household", session: { role: "household", name: "HH-019" } },
+  // HH-008: a real household (a small shop) from the recorded run that
+  // accepted a paid level-0.5 DR offer and earned a dr_incentive payout
+  // — the one household in this run with that story, now that the
+  // blackout-hours fix (sim/personas.py) lets a shop that closes by
+  // 19:00 actually respond to this evening-peak event. Earlier picks:
+  // "HH-0031" didn't match the real 3-digit id format; HH-084 and
+  // HH-019 both settled with zero DR earnings (absorption/rebate only)
+  // because no household had ever accepted a paid offer in this run
+  // before that fix.
+  household: { password: "household", session: { role: "household", name: "HH-008" } },
 };
 
 export function checkCredentials(username: string, password: string): Session | null {
