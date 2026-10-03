@@ -85,9 +85,11 @@ export default function Timeline({
   const trackRef = useRef<HTMLDivElement | null>(null);
   const rafRef = useRef<number | null>(null);
   const lastFrameRef = useRef<number | null>(null);
+  const currentMsRef = useRef(currentMs);
 
   const emit = useCallback(
     (ms: number) => {
+      currentMsRef.current = ms;
       setCurrentMs(ms);
       onScrub?.(new Date(ms).toISOString());
     },
@@ -95,30 +97,43 @@ export default function Timeline({
   );
 
   // Playback loop: advance `speed` sim-seconds per real second via rAF.
+  // `onScrub` (which drives the parent's state, and from there the map)
+  // is called directly here, exactly like emit() does for manual
+  // scrubbing - never nested inside the setCurrentMs updater. A side
+  // effect that fires a DIFFERENT component's setState from inside a
+  // setState updater function is not something React guarantees runs
+  // every frame; confirmed that was silently swallowing the parent
+  // update on every tick but one (the final clamp-to-end), which is why
+  // the map only ever visibly updated on manual drag, never during Play.
   useEffect(() => {
     if (!playing) {
       lastFrameRef.current = null;
       return;
     }
+    let stopped = false;
     const step = (now: number) => {
+      if (stopped) return;
       if (lastFrameRef.current != null) {
         const realElapsedS = (now - lastFrameRef.current) / 1000;
-        setCurrentMs((prev) => {
-          const next = prev + realElapsedS * speed * 1000;
-          if (next >= endMs) {
-            setPlaying(false);
-            onScrub?.(new Date(endMs).toISOString());
-            return endMs;
-          }
-          onScrub?.(new Date(next).toISOString());
-          return next;
-        });
+        const next = currentMsRef.current + realElapsedS * speed * 1000;
+        if (next >= endMs) {
+          currentMsRef.current = endMs;
+          setCurrentMs(endMs);
+          onScrub?.(new Date(endMs).toISOString());
+          setPlaying(false);
+          stopped = true;
+          return;
+        }
+        currentMsRef.current = next;
+        setCurrentMs(next);
+        onScrub?.(new Date(next).toISOString());
       }
       lastFrameRef.current = now;
       rafRef.current = requestAnimationFrame(step);
     };
     rafRef.current = requestAnimationFrame(step);
     return () => {
+      stopped = true;
       if (rafRef.current != null) cancelAnimationFrame(rafRef.current);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
