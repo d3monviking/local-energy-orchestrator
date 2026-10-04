@@ -72,7 +72,7 @@ class EligibleHousehold:
 
 
 def eligible_households(
-    conn, phase: str, event_date, window_start_hour: int, window_end_hour: int,
+    conn, phase: str, event_date, window_start_hour: int, window_end_hour: int, run_id: str | None = None,
 ) -> list[EligibleHousehold]:
     """Build Spec §11.3 step 1: phase, consent, >=14 days of history
     (household.enrolled_at — NULL, i.e. present since the world was
@@ -102,8 +102,12 @@ def eligible_households(
             """SELECT o.sent_at, o.replied, o.verified_kwh
                FROM dr_offer o JOIN dr_event e ON e.run_id = o.run_id AND e.id = o.event_id
                WHERE o.household_id = %s AND e.window_start >= %s
+                 AND (%s::text IS NULL OR o.run_id = %s)
                ORDER BY o.sent_at DESC""",
-            (hh_id, month_start),
+            # Offer history is per recorded run: each run is its own world.
+            # Counting across runs let the copies of one day's offers in the
+            # outage/load-shedding runs hit the monthly cap for this one.
+            (hh_id, month_start, run_id, run_id),
         )
         history = cur.fetchall()
         offers_this_month = len(history)
@@ -188,14 +192,18 @@ def run_dr_event(
     in for that history existing already, same as a real bandit wouldn't
     be launched from scratch the morning of its first event either.
     """
-    pool = eligible_households(conn, phase, event_date, window_start.hour, window_end.hour)
+    pool = eligible_households(conn, phase, event_date, window_start.hour, window_end.hour, run_id=run_id)
     rng.shuffle(pool)
     n_holdout = int(len(pool) * HOLDOUT_FRAC)
     holdout_ids = {hh.household_id for hh in pool[:n_holdout]}
 
     duration_hours = (window_end - window_start).total_seconds() / 3600.0
     event = {
-        "start_hour_frac": window_start.hour / 24.0, "duration_hours": duration_hours,
+        # Local (IST) hour, matching how sim/loop.py trains the bandit (19/24
+        # for an evening event); window_start is UTC, so .hour alone served
+        # the bandit 13/24 - a context it never saw in training.
+        "start_hour_frac": ((window_start.hour + window_start.minute / 60 + 5.5) % 24) / 24.0,
+        "duration_hours": duration_hours,
         "day_of_week_frac": window_start.weekday() / 7.0, "forecast_temp_c": forecast_temp_c,
         "hours_notice": hours_notice,
     }

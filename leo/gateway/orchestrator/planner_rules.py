@@ -27,13 +27,16 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Optional
 
+LOCAL_UTC_OFFSET_HOURS = 5.5  # IST; the neighbourhood's timezone (neighbourhood.timezone)
+
 
 @dataclass
 class IntervalForecast:
     ts_end: datetime
     max_charge_kw: float       # from network_model.compute_phase_limits, positive magnitude
     max_discharge_kw: float    # from network_model.compute_phase_limits, positive magnitude
-    violation_severity: float = 0.0  # 0 = no forecast violation this interval; else pu beyond the limit
+    violation_severity: float = 0.0  # forecast UNDERvoltage/overload: pu beyond the lower limit (discharge into it)
+    over_severity: float = 0.0       # forecast OVERvoltage: pu beyond the upper limit (charge into it, never discharge)
 
 
 def _contiguous_violation_blocks(intervals: list[IntervalForecast]) -> list[list[int]]:
@@ -73,6 +76,7 @@ def plan_rule_based(
     soc_ceiling_kwh = soc_max * capacity_kwh
 
     blocks = _contiguous_violation_blocks(intervals)
+    has_over = any(iv.over_severity > 0 for iv in intervals)
     block_start = {b[0]: b for b in blocks}
 
     i = 0
@@ -91,7 +95,20 @@ def plan_rule_based(
             continue
 
         iv = intervals[i]
-        if charge_window_hours[0] <= iv.ts_end.hour < charge_window_hours[1]:
+        # The window is LOCAL (IST) midday. ts_end is UTC, so reading
+        # ts_end.hour directly put the "10:00-15:00" window at 15:30-20:30
+        # IST - charging every block into the onset of the evening peak,
+        # which itself caused undervoltage an hour before the forecast did.
+        local_hour = (iv.ts_end.hour + iv.ts_end.minute / 60.0 + LOCAL_UTC_OFFSET_HOURS) % 24
+        # §9.4: with a forecast midday overvoltage, keep headroom and charge
+        # only INTO the overvoltage window (absorbing the surplus where it
+        # does good); filling up greedily from 10:00 leaves the block full
+        # before the solar peak arrives.
+        if has_over:
+            charge_now = iv.over_severity > 0
+        else:
+            charge_now = charge_window_hours[0] <= local_hour < charge_window_hours[1]
+        if charge_now:
             headroom_kwh = soc_ceiling_kwh - soc_kwh
             charge_kw = max(0.0, min(iv.max_charge_kw, power_kw, headroom_kwh / (interval_hours * efficiency)))
             setpoint_kw[i] = -charge_kw

@@ -280,6 +280,10 @@ def detect_violations(net, v_limit_pct: float) -> pd.DataFrame:
     flagged against the network's voltage limit. One row per (bus, phase),
     matching the `network_result` table shape."""
     line_to_bus = dict(zip(net.line["to_bus"], net.line.index))
+    # The LV busbar's upstream element is the distribution transformer, not
+    # a line, so it used to get no loading at all - the one quantity the
+    # scenario is about (a DT that outgrew its rating) was never recorded.
+    trafo_lv_bus = int(net.trafo["lv_bus"].iloc[0]) if len(net.trafo) else None
     rows = []
     for bus_idx_, bus_row in net.bus.iterrows():
         if bus_row["name"] == "HV-SOURCE" or bus_idx_ not in net.res_bus_3ph.index:
@@ -289,7 +293,9 @@ def detect_violations(net, v_limit_pct: float) -> pd.DataFrame:
         for phase, letter in PHASE_LETTER.items():
             vm_pu = res[f"vm_{letter}_pu"]
             loading_pct = None
-            if line_idx is not None:
+            if bus_idx_ == trafo_lv_bus:
+                loading_pct = float(net.res_trafo_3ph.iloc[0][f"loading_{letter}_percent"])
+            elif line_idx is not None:
                 loading_pct = net.res_line_3ph.loc[line_idx, f"loading_{letter}_percent"]
             rows.append({
                 "bus_id": bus_row["name"],

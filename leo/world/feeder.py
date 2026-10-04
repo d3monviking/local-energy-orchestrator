@@ -386,7 +386,12 @@ def build_household_registry(
             "bus_id": att.household_bus_id,
             "sanctioned_load_kw": _sanctioned_load_kw(is_business, rng),
             "has_pv": has_pv,
-            "pv_kwp": round(rng.uniform(1.0, 3.0), 2) if has_pv else None,
+            # 2-6 kWp (was 1-3): at 1-3 kWp no day of the year exports enough
+            # to push any bus past +6% (best case 256.8V vs a 265V limit), so
+            # the architecture's midday-overvoltage event could never occur.
+            # Still one draw, so the rng sequence (and every other attribute)
+            # is unchanged.
+            "pv_kwp": round(rng.uniform(2.0, 6.0), 2) if has_pv else None,
             "is_business": is_business,
             "is_critical": i in critical_idx,
             "critical_class": "health" if i in critical_idx else "none",

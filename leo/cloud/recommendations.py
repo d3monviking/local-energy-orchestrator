@@ -14,7 +14,7 @@ recorded run already wrote.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import psycopg2.extras
 
@@ -32,7 +32,8 @@ ACTION_BY_ISSUE = {
 # after the battery+DR plan ran, is "recurring" rather than a one-off —
 # the threshold that turns a residual gap into a DISCOM-facing
 # recommendation rather than something LEO just quietly absorbed less of.
-RESIDUAL_VIOLATION_SHARE_THRESHOLD = 0.15
+RESIDUAL_MIN_INTERVALS = 4  # an hour or more out of limits with LEO running
+V_LIMIT_PCT = 6.0  # neighbourhood.v_limit_pct
 
 
 @dataclass
@@ -60,50 +61,59 @@ def _next_rec_id(conn, window_start: datetime) -> str:
 
 
 def recommend_residual_violations(conn, run_id: str, dt_id: str, nominal_v_ln: float) -> list[RecommendationDraft]:
-    """A phase that's still violating a meaningful share of the day's
-    intervals even in the LEO-on run has a gap the battery+DR plan
-    couldn't close locally — exactly the "residual goes to the
-    recommendation engine" step network_model.py's job 3 describes.
+    """A phase still out of limits for an hour or more in the LEO-on run
+    has a gap the battery+DR plan couldn't close locally — exactly the
+    "residual goes to the recommendation engine" step (§14 escalation).
+
+    Measured in TIME (intervals where any bus on the phase is out of
+    limits), not as a share of bus x interval readings: the latter
+    dilutes a 5-hour evening sag on the far end of a phase into a small
+    percentage because the near-end buses stay fine, and stopped
+    escalating real problems entirely once violations became evening-only.
     """
     cur = conn.cursor()
     cur.execute(
-        """SELECT phase, count(*) FILTER (WHERE violation) AS n_violating, count(*) AS n_total,
-                  min(voltage_v) AS worst_under, max(voltage_v) AS worst_over,
-                  min(ts_end) AS window_start, max(ts_end) AS window_end
-           FROM network_result WHERE run_id = %s GROUP BY phase""",
+        """SELECT phase::text, ts_end, min(voltage_v) AS min_v, max(voltage_v) AS max_v
+           FROM network_result WHERE run_id = %s AND NOT is_forecast
+           GROUP BY phase, ts_end HAVING bool_or(violation) ORDER BY phase, ts_end""",
         (run_id,),
     )
     rows = cur.fetchall()
     cur.close()
 
+    floor = nominal_v_ln * (1 - V_LIMIT_PCT / 100)
+    ceiling = nominal_v_ln * (1 + V_LIMIT_PCT / 100)
     drafts = []
-    for phase, n_violating, n_total, worst_under, worst_over, window_start, window_end in rows:
-        share = n_violating / n_total if n_total else 0.0
-        if share < RESIDUAL_VIOLATION_SHARE_THRESHOLD:
-            continue
-
-        undervolt_gap = nominal_v_ln - worst_under
-        overvolt_gap = worst_over - nominal_v_ln
-        if undervolt_gap >= overvolt_gap:
-            issue, gap_v = "forecast_undervoltage", undervolt_gap
-        else:
-            issue, gap_v = "forecast_overvoltage", overvolt_gap
-
-        severity = "high" if share > 0.5 else ("medium" if share > 0.3 else "low")
-        rec_id = _next_rec_id(conn, window_start.replace(tzinfo=timezone.utc) if window_start.tzinfo is None else window_start)
-        drafts.append(RecommendationDraft(
-            rec_id=rec_id, dt_id=dt_id, phase=phase, window_start=window_start, window_end=window_end,
-            issue=issue, severity=severity, residual_gap_kw=None,
-            local_actions=["battery_dispatch", "dr_offers"],
-            recommended_action=ACTION_BY_ISSUE[issue],
-            evidence={
-                "violating_intervals": n_violating, "total_intervals": n_total,
-                "violation_share": round(share, 3), "worst_voltage_v": round(worst_under if issue == "forecast_undervoltage" else worst_over, 1),
-                "nominal_v_ln": nominal_v_ln, "run_id": run_id,
-            },
-        ))
+    seq = 0
+    # One escalation per phase AND direction: a sunny day can have both a
+    # midday overvoltage and an evening undervoltage on the same phase, and
+    # they need opposite DISCOM actions (lower vs raise tap).
+    for phase in ("R", "Y", "B"):
+        for issue, test, worst_of in (
+            ("forecast_undervoltage", lambda r: r[2] < floor, lambda rs: min(r[2] for r in rs)),
+            ("forecast_overvoltage", lambda r: r[3] > ceiling, lambda rs: max(r[3] for r in rs)),
+        ):
+            hits = [r for r in rows if r[0] == phase and test(r)]
+            if len(hits) < RESIDUAL_MIN_INTERVALS:
+                continue
+            worst = worst_of(hits)
+            gap_v = abs(worst - nominal_v_ln)
+            severity = "high" if gap_v > 25 else ("medium" if gap_v > 18 else "low")
+            window_start, window_end = hits[0][1], hits[-1][1]
+            base = _next_rec_id(conn, window_start)
+            rec_id = f"{base[:-3]}{int(base[-3:]) + seq:03d}"
+            seq += 1
+            drafts.append(RecommendationDraft(
+                rec_id=rec_id, dt_id=dt_id, phase=phase, window_start=window_start - timedelta(minutes=15),
+                window_end=window_end, issue=issue, severity=severity, residual_gap_kw=None,
+                local_actions=["battery_dispatch", "dr_offers", "live_voltage_rule"],
+                recommended_action=ACTION_BY_ISSUE[issue],
+                evidence={
+                    "hours_out_of_limits": len(hits) / 4, "worst_voltage_v": round(worst, 1),
+                    "deviation_v": round(gap_v, 1), "nominal_v_ln": nominal_v_ln, "run_id": run_id,
+                },
+            ))
     return drafts
-
 
 def recommend_outage_scope(conn, run_id: str, dt_id: str) -> list[RecommendationDraft]:
     """Turns an 'outage' run's grid_loss/backup_start events and critical-
@@ -187,24 +197,31 @@ if __name__ == "__main__":
     nominal_v_ln = float(_cur.fetchone()[0])  # 250 in this scenario; a hardcoded 230 mislabelled undervoltage as overvoltage
     _cur.close()
 
-    for run_id in ("normal", "outage"):
+    for run_id in ("normal", "outage", "load_shedding", "surplus"):
         cur = conn.cursor()
         cur.execute("DELETE FROM recommendation WHERE run_id = %s", (run_id,))
         conn.commit()
         cur.close()
 
-    residual = recommend_residual_violations(conn, "normal", dt_id, nominal_v_ln)
-    print(f"residual-violation recommendations from 'normal': {len(residual)}")
-    for d in residual:
-        print(f"  {d.rec_id}: phase {d.phase}, {d.issue}, severity={d.severity}, action={d.recommended_action}")
-    n = write_recommendations(conn, residual, "normal")
-    print(f"wrote {n} rows")
+    cur = conn.cursor()
+    cur.execute("SELECT run_id FROM run")
+    existing = {r[0] for r in cur.fetchall()}
+    cur.close()
 
-    outage_recs = recommend_outage_scope(conn, "outage", dt_id)
-    print(f"\noutage recommendations from 'outage': {len(outage_recs)}")
-    for d in outage_recs:
-        print(f"  {d.rec_id}: {d.issue}, action={d.recommended_action}, evidence={d.evidence}")
-    n = write_recommendations(conn, outage_recs, "outage")
-    print(f"wrote {n} rows")
+    for run_id in ("normal", "surplus"):
+        if run_id not in existing:
+            continue
+        residual = recommend_residual_violations(conn, run_id, dt_id, nominal_v_ln)
+        print(f"residual-violation recommendations from {run_id!r}: {len(residual)}")
+        for d in residual:
+            print(f"  {d.rec_id}: phase {d.phase}, {d.issue}, severity={d.severity}, action={d.recommended_action}")
+        write_recommendations(conn, residual, run_id)
+
+    for run_id in ("outage", "load_shedding"):
+        if run_id not in existing:
+            continue
+        outage_recs = recommend_outage_scope(conn, run_id, dt_id)
+        print(f"outage recommendations from {run_id!r}: {len(outage_recs)}")
+        write_recommendations(conn, outage_recs, run_id)
 
     conn.close()

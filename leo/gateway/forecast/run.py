@@ -130,7 +130,10 @@ def forecast_phase_net_load_kw(
     phase_installed_kwp = static_features.get("phase_installed_kwp", 0.0)
     pv_forecast = unit_pv * inputs.pv_k * phase_installed_kwp
 
-    return (gross_forecast - pv_forecast).clip(lower=0.0)
+    # Not clipped at zero: a negative net load is a phase exporting PV
+    # surplus, which is exactly what the planner needs to see to forecast
+    # midday overvoltage and schedule charge-from-surplus.
+    return gross_forecast - pv_forecast
 
 
 def run_day_ahead_plan(
@@ -148,21 +151,39 @@ def run_day_ahead_plan(
     holidays_set: set,
     festivals_set: set,
     initial_soc_frac: float = 0.5,
+    artifacts: dict | None = None,
 ) -> dict[str, dict]:
     """NM->BO->OP: turn the forecast into per-phase violations and safe
     limits (network_model.py), then a draft battery plan (orchestrator).
     Returns {phase: plan_record}, each matching contracts/schemas/plan.schema.json.
+
+    If `artifacts` is passed it's filled with everything the plan was
+    based on - P10/P50/P90 net load, the weather inputs, the predicted
+    per-bus voltages and transformer loading, and the safe limits - so the
+    operator console can show *why* a plan says what it says. Previously
+    all of this was computed and discarded.
     """
     target_ts = pd.date_range(
         pd.Timestamp(plan_date, tz="UTC") + pd.Timedelta(minutes=15), periods=96, freq="15min"
     )
 
     net_load_by_phase = {}
+    quantiles_by_phase = {}
     for phase in PHASES:
         net_load_by_phase[phase] = forecast_phase_net_load_kw(
             phase, target_ts, run_time, inputs, gross_load_history_by_phase[phase],
             static_features_by_phase[phase], holidays_set, festivals_set,
         )
+        if artifacts is not None:
+            quantiles_by_phase[phase] = {
+                q: forecast_phase_net_load_kw(
+                    phase, target_ts, run_time, inputs, gross_load_history_by_phase[phase],
+                    static_features_by_phase[phase], holidays_set, festivals_set, quantile=q,
+                )
+                for q in ("p10", "p50", "p90")
+            }
+    predicted_rows: list[dict] = []
+    interval_rows: list[dict] = []
 
     net = build_pandapower_net(feeder, transformer_kva, nominal_v_ln)
     bus_id_by_hhid = dict(zip(feeder.household["id"], feeder.household["bus_id"]))
@@ -170,36 +191,64 @@ def run_day_ahead_plan(
     intervals_by_phase = {p: [] for p in PHASES}
     battery_by_phase = {b["phase"]: b for b in battery_blocks}
 
+    # Per-household PV forecast (unit output x calibrated k x that home's
+    # own kWp). Net load is disaggregated as gross-by-sanctioned-load MINUS
+    # PV-by-installed-kWp: spreading the phase's NET forecast by sanctioned
+    # share instead assigned solar export to homes without panels, smearing
+    # it across the phase - confirmed it hid a real midday overvoltage
+    # (269.8 V actual) from the forecast entirely.
+    weather_window = inputs.weather_15min[inputs.weather_15min["ts"].isin(target_ts)]
+    unit_pv = unit_pv_output_kw(inputs.lat, inputs.lon, weather_window).reindex(target_ts, fill_value=0.0)
+    kwp_by_hh = {h: (float(k) if k == k and k is not None else 0.0)
+                 for h, k in zip(feeder.household["id"], feeder.household["pv_kwp"])}
+
     for i, ts in enumerate(target_ts):
-        # Disaggregate each phase's forecast net load back to households
-        # by sanctioned-load share (the same apportionment style used
-        # throughout pv_model.py's calibration passes), so the network
-        # model has something per-bus to run a power flow against.
         loads_by_bus = {}
         for phase in PHASES:
             phase_hh = feeder.household[feeder.household["phase"] == phase]
             phase_total_sanctioned = phase_hh["sanctioned_load_kw"].sum()
-            phase_forecast_kw = net_load_by_phase[phase].iloc[i]
+            phase_pv_kw = float(unit_pv.iloc[i]) * inputs.pv_k * sum(kwp_by_hh[h] for h in phase_hh["id"])
+            phase_gross_kw = net_load_by_phase[phase].iloc[i] + phase_pv_kw
             for hh_id, sanctioned in zip(phase_hh["id"], phase_hh["sanctioned_load_kw"]):
                 share = sanctioned / phase_total_sanctioned if phase_total_sanctioned > 0 else 0.0
-                loads_by_bus[bus_id_by_hhid[hh_id]] = phase_forecast_kw * share
+                hh_pv = float(unit_pv.iloc[i]) * inputs.pv_k * kwp_by_hh[hh_id]
+                loads_by_bus[bus_id_by_hhid[hh_id]] = phase_gross_kw * share - hh_pv
 
         update_household_loads(net, feeder, loads_by_bus)
         run_power_flow(net)
         violations = detect_violations(net, v_limit_pct)
+        if artifacts is not None:
+            for r in violations.itertuples():
+                predicted_rows.append({"ts_end": ts, "bus_id": r.bus_id, "phase": r.phase, "voltage_v": r.voltage_v,
+                                       "loading_pct": r.loading_pct, "violation": bool(r.violation)})
 
         for phase in PHASES:
             phase_v = violations[violations["phase"] == phase]
-            severity = float(
-                ((phase_v["voltage_v"] - nominal_v_ln).abs() / nominal_v_ln
-                 - v_limit_pct / 100.0).clip(lower=0).max()
-            ) if not phase_v.empty else 0.0
+            dev = (phase_v["voltage_v"] - nominal_v_ln) / nominal_v_ln if not phase_v.empty else None
+            severity = float((-dev - v_limit_pct / 100.0).clip(lower=0).max()) if dev is not None else 0.0
+            over_severity = float((dev - v_limit_pct / 100.0).clip(lower=0).max()) if dev is not None else 0.0
             limits = compute_phase_limits(
                 net, feeder.root, phase, v_limit_pct, battery_by_phase[phase]["power_kw"]
             )
+            if artifacts is not None:
+                root_row = phase_v[phase_v["bus_id"] == str(feeder.root)]
+                wx = inputs.weather_15min[inputs.weather_15min["ts"] == ts]
+                interval_rows.append({
+                    "ts_end": ts, "phase": phase,
+                    "p10_kw": float(quantiles_by_phase[phase]["p10"].iloc[i]),
+                    "p50_kw": float(quantiles_by_phase[phase]["p50"].iloc[i]),
+                    "p90_kw": float(quantiles_by_phase[phase]["p90"].iloc[i]),
+                    "min_v": float(phase_v["voltage_v"].min()), "max_v": float(phase_v["voltage_v"].max()),
+                    "trafo_loading_pct": float(root_row["loading_pct"].iloc[0]) if not root_row.empty else None,
+                    "severity": severity, "over_severity": over_severity,
+                    "max_charge_kw": limits.max_charge_kw, "max_discharge_kw": limits.max_discharge_kw,
+                    "temperature_c": float(wx["temperature_c"].iloc[0]) if not wx.empty else None,
+                    "ghi_w_m2": float(wx["ghi_w_m2"].iloc[0]) if not wx.empty else None,
+                })
             intervals_by_phase[phase].append(IntervalForecast(
                 ts_end=ts, max_charge_kw=limits.max_charge_kw,
                 max_discharge_kw=limits.max_discharge_kw, violation_severity=severity,
+                over_severity=over_severity,
             ))
 
     plans = {}
@@ -216,6 +265,8 @@ def run_day_ahead_plan(
             "intervals": plan_intervals, "reserve_floor_kwh": reserve_floor_kwh,
             "status": "draft", "approved_by": None, "approved_at": None,
         }
+    if artifacts is not None:
+        artifacts.update({"run_time": run_time, "predicted": predicted_rows, "intervals": interval_rows})
     return plans
 
 
