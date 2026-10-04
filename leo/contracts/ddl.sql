@@ -139,6 +139,11 @@ CREATE TABLE sensor_reading (
   provenance     provenance_t NOT NULL,
   PRIMARY KEY (run_id, sensor_id, ts_end)
 );
+-- (run_id, sensor_id, ts_end) alone doesn't help a "nearest ts_end
+-- across every sensor in this run" lookup (api.py's per-tick reads for
+-- the live telemetry strip/map tooltip) since ts_end isn't the leading
+-- column after sensor_id.
+CREATE INDEX idx_sensor_reading_run_ts ON sensor_reading (run_id, ts_end);
 
 -- received_at enforces the latency rule.
 -- Model queries MUST filter on received_at <= run_time, never on ts_end.
@@ -261,6 +266,10 @@ CREATE TABLE dispatch (
   rule_triggered TEXT,                     -- 'undervoltage','overvoltage',NULL
   PRIMARY KEY (run_id, block_id, ts_end)
 );
+-- Same reasoning as sensor_reading's index above: ts_end isn't the
+-- leading column after block_id, but the live telemetry strip/map
+-- tooltip look up "nearest ts_end across all three blocks" every tick.
+CREATE INDEX idx_dispatch_run_ts ON dispatch (run_id, ts_end);
 
 CREATE TABLE dr_event (
   run_id       TEXT NOT NULL REFERENCES run(run_id),

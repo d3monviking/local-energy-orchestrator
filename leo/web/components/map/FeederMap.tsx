@@ -77,6 +77,8 @@ export type FeederMapProps = {
   backupBusIds?: Set<string>;
   /** phase -> latest dispatch row at the scrubbed ts, for the battery_block tooltip. */
   liveDispatchByPhase?: Record<string, { actual_kw: number; soc_after: number; mode: string; rule_triggered: string | null }>;
+  /** Count of buses in violation at the current ts, for the parent's banner. */
+  onViolatingCount?: (n: number) => void;
 };
 
 function voltageColor(v: number, nominal: number, limitPct: number): [number, number, number] {
@@ -94,6 +96,7 @@ export default function FeederMap({
   vLimitPct = 6,
   backupBusIds,
   liveDispatchByPhase,
+  onViolatingCount,
 }: FeederMapProps) {
   const [data, setData] = useState<FeederCollection | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -114,16 +117,31 @@ export default function FeederMap({
     };
   }, [dtId]);
 
-  // Re-fetched on every scrub tick; the backend snaps `ts` to the nearest
-  // recorded 15-minute interval, so this is cheap and always in sync with
-  // the timeline rather than interpolated client-side.
+  // Snapped to the same 15-minute grid the backend snaps `ts_end` to
+  // (api.py's network_result_at), and used as the effect's own
+  // dependency instead of the raw, continuously-changing `ts` prop.
+  // During Play, ts changes every animation frame (~60/sec); re-firing
+  // this effect that often means each fetch's cleanup cancels the
+  // PREVIOUS one before its round trip (a full ORDER BY abs(epoch
+  // diff) scan) can complete, so almost no response ever won the race
+  // - confirmed the map's colours only ever updated on manual scrub,
+  // where ts eventually stops changing long enough for one request to
+  // land. Snapping first means this only actually re-fetches once per
+  // recorded interval, not once per frame.
+  const snappedTs = useMemo(() => {
+    if (!ts) return undefined;
+    const FIFTEEN_MIN_MS = 15 * 60 * 1000;
+    const ms = Math.floor(new Date(ts).getTime() / FIFTEEN_MIN_MS) * FIFTEEN_MIN_MS;
+    return new Date(ms).toISOString();
+  }, [ts]);
+
   useEffect(() => {
-    if (!runId || !ts) {
+    if (!runId || !snappedTs) {
       setBusState(null);
       return;
     }
     let cancelled = false;
-    fetch(`${CLOUD_API_URL}/api/network_result/${runId}?ts_end=${encodeURIComponent(ts)}`)
+    fetch(`${CLOUD_API_URL}/api/network_result/${runId}?ts_end=${encodeURIComponent(snappedTs)}`)
       .then((r) => {
         if (!r.ok) throw new Error(`${r.status} ${r.statusText}`);
         return r.json();
@@ -141,12 +159,13 @@ export default function FeederMap({
           }
         }
         setBusState(byBus);
+        onViolatingCount?.(Object.values(byBus).filter((b) => b.violation).length);
       })
       .catch(() => !cancelled && setBusState(null));
     return () => {
       cancelled = true;
     };
-  }, [runId, ts, nominalV]);
+  }, [runId, snappedTs, nominalV]);
 
   const initialViewState = useMemo(() => {
     const [lon, lat] = data?.properties.centroid ?? [77.7942, 13.07];
@@ -190,8 +209,16 @@ export default function FeederMap({
           .sort((a, b) => Math.abs(b.voltage_v - nominalV) - Math.abs(a.voltage_v - nominalV))[0];
         return worse ? voltageColor(worse.voltage_v, nominalV, vLimitPct) : [93, 110, 125];
       },
-      getLineWidth: 1.2,
+      getLineWidth: (f: GeoJSON.Feature<GeoJSON.Geometry, FeederProperties>) => {
+        const from = f.properties.from_bus ? busState?.[f.properties.from_bus] : undefined;
+        const to = f.properties.to_bus ? busState?.[f.properties.to_bus] : undefined;
+        // Violating lines get a visibly bolder stroke, not just a color
+        // change - a thin red line reads the same as a thin green one
+        // at a glance; a thick one doesn't.
+        return from?.violation || to?.violation ? 3.5 : 1.2;
+      },
       lineWidthMinPixels: 1,
+      lineWidthUpdateTriggers: { getLineWidth: [busState] },
       pickable: true,
     });
 
@@ -241,6 +268,25 @@ export default function FeederMap({
           feeder data unavailable: {error}
         </div>
       )}
+
+      <div className="absolute top-2 right-2 rounded-md bg-black/70 text-xs px-2 py-1.5 flex flex-col gap-1">
+        <span className="flex items-center gap-1.5">
+          <span className="inline-block w-2 h-2 rounded-full" style={{ background: "rgb(47,191,113)" }} />
+          healthy (within {(vLimitPct * 0.7).toFixed(1)}% of {nominalV}V)
+        </span>
+        <span className="flex items-center gap-1.5">
+          <span className="inline-block w-2 h-2 rounded-full" style={{ background: "rgb(224,167,46)" }} />
+          approaching limit ({(vLimitPct * 0.7).toFixed(1)}–{vLimitPct}% off nominal)
+        </span>
+        <span className="flex items-center gap-1.5">
+          <span className="inline-block w-2 h-2 rounded-full" style={{ background: "rgb(224,71,62)" }} />
+          violating ({'>'}{vLimitPct}% off nominal — thicker line too)
+        </span>
+        <span className="flex items-center gap-1.5">
+          <span className="inline-block w-2 h-2 rounded-full border border-[#3ba9ff]" style={{ background: "transparent" }} />
+          on backup power (outage run)
+        </span>
+      </div>
 
       {data && (
         <div className="absolute bottom-2 left-2 rounded-md bg-black/60 text-xs text-[var(--leo-text-dim)] px-2 py-1 max-w-sm">

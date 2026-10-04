@@ -245,6 +245,52 @@ async def network_result_at(run_id: str, ts_end: str) -> dict:
     }
 
 
+@app.get("/api/violation_episodes/{run_id}")
+async def violation_episodes(run_id: str, nominal_v_ln: float = 230.0) -> list[dict]:
+    """Per-phase voltage violations as contiguous episodes (start/end,
+    worst voltage, over/under), not the raw per-15-minute-interval flag
+    network_result carries. The operator console's violation banner and
+    its "impacted phase" highlighting read this — a banner can't latch
+    onto a boolean that flips every interval, it needs a start and an
+    end. Computed with a classic gaps-and-islands grouping: collapse to
+    one row per (phase, ts_end) first (several buses can share a
+    timestamp), number the violating rows in ts_end order, and rows
+    whose (ts_end - row_number * 15min) matches are contiguous.
+    """
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            """
+            WITH per_interval AS (
+                SELECT phase, ts_end, bool_or(violation) AS violation,
+                       max(voltage_v) AS max_v, min(voltage_v) AS min_v
+                FROM network_result WHERE run_id = $1 AND is_forecast = false
+                GROUP BY phase, ts_end
+            ),
+            flagged AS (
+                SELECT phase, ts_end, max_v, min_v,
+                       ts_end - (row_number() OVER (PARTITION BY phase ORDER BY ts_end) * interval '15 min') AS grp
+                FROM per_interval WHERE violation
+            )
+            SELECT phase, min(ts_end) AS start_ts, max(ts_end) + interval '15 min' AS end_ts,
+                   count(*) AS n_intervals, max(max_v) AS worst_over_v, min(min_v) AS worst_under_v
+            FROM flagged GROUP BY phase, grp ORDER BY phase, start_ts
+            """,
+            run_id,
+        )
+    episodes = []
+    for r in rows:
+        over_dev = r["worst_over_v"] - nominal_v_ln
+        under_dev = nominal_v_ln - r["worst_under_v"]
+        is_over = over_dev >= under_dev
+        episodes.append({
+            "phase": r["phase"], "start_ts": r["start_ts"].isoformat(), "end_ts": r["end_ts"].isoformat(),
+            "n_intervals": r["n_intervals"], "kind": "overvoltage" if is_over else "undervoltage",
+            "worst_voltage_v": round(r["worst_over_v"] if is_over else r["worst_under_v"], 1),
+            "deviation_v": round(over_dev if is_over else under_dev, 1),
+        })
+    return episodes
+
+
 @app.get("/api/events/{run_id}")
 async def events_for_run(run_id: str) -> list[dict]:
     """Event markers for the timeline (§8.1): overload trips, outage/
