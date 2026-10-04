@@ -40,6 +40,11 @@ export type TimelineProps = {
   speed?: number;
   initialTs?: string;
   onScrub?: (ts: string) => void;
+  /** Shaded spans under the track, e.g. the forecast's predicted event windows. */
+  bands?: { startTs: string; endTs: string; color: string; label: string }[];
+  /** Jump the playhead from outside (bump `nonce` to re-trigger the same ts). */
+  seekTo?: { ts: string; nonce: number } | null;
+  onPlayingChange?: (playing: boolean) => void;
 };
 
 const SEGMENT_COLOR: Record<SegmentKind, string> = {
@@ -55,7 +60,13 @@ const EVENT_COLOR: Record<TimelineEventKind, string> = {
   restoration: "var(--leo-ok)",
 };
 
-const SPEED_OPTIONS = [1, 60, 600, 3600];
+const SPEED_OPTIONS = [60, 300, 900, 3600];
+
+export function fmtIST(ms: number): string {
+  return new Date(ms).toLocaleString("en-IN", {
+    timeZone: "Asia/Kolkata", day: "2-digit", month: "short", hour: "2-digit", minute: "2-digit", hour12: false,
+  }) + " IST";
+}
 
 function clamp(x: number, lo: number, hi: number): number {
   return Math.min(hi, Math.max(lo, x));
@@ -68,9 +79,12 @@ export default function Timeline({
   segments,
   events = [],
   overlayRunId,
-  speed: initialSpeed = 60,
+  speed: initialSpeed = 900,
   initialTs,
   onScrub,
+  bands = [],
+  seekTo,
+  onPlayingChange,
 }: TimelineProps) {
   const startMs = useMemo(() => new Date(startTs).getTime(), [startTs]);
   const endMs = useMemo(() => new Date(endTs).getTime(), [endTs]);
@@ -95,6 +109,18 @@ export default function Timeline({
     },
     [onScrub]
   );
+
+  useEffect(() => {
+    onPlayingChange?.(playing);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [playing]);
+
+  useEffect(() => {
+    if (!seekTo) return;
+    setPlaying(false);
+    emit(clamp(new Date(seekTo.ts).getTime(), startMs, endMs));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [seekTo?.nonce]);
 
   // Playback loop: advance `speed` sim-seconds per real second via rAF.
   // `onScrub` (which drives the parent's state, and from there the map)
@@ -207,7 +233,7 @@ export default function Timeline({
         </select>
 
         <span className="text-sm text-[var(--leo-text-dim)] tabular-nums">
-          {new Date(currentMs).toLocaleString("en-IN", { hour12: false })}
+          {fmtIST(currentMs)}
         </span>
 
         <span className="ml-auto text-xs text-[var(--leo-text-dim)]">
@@ -232,8 +258,8 @@ export default function Timeline({
         aria-valuemin={startMs}
         aria-valuemax={endMs}
         aria-valuenow={currentMs}
-        aria-valuetext={new Date(currentMs).toLocaleString("en-IN", { hour12: false })}
-        className="relative h-10 rounded-md border border-[var(--leo-border)] bg-[var(--leo-panel)] cursor-pointer overflow-hidden focus:outline focus:outline-2 focus:outline-[var(--leo-accent)]"
+        aria-valuetext={fmtIST(currentMs)}
+        className="relative h-14 rounded-md border border-[var(--leo-border)] bg-[var(--leo-panel)] cursor-pointer overflow-hidden focus:outline focus:outline-2 focus:outline-[var(--leo-accent)]"
       >
         {segments.map((seg, i) => {
           const segStart = new Date(seg.startTs).getTime();
@@ -257,6 +283,23 @@ export default function Timeline({
           );
         })}
 
+        {bands.map((b, i) => {
+          const bs = new Date(b.startTs).getTime();
+          const be = new Date(b.endTs).getTime();
+          const left = clamp(((bs - startMs) / durationMs) * 100, 0, 100);
+          const width = clamp(((be - bs) / durationMs) * 100, 0, 100 - left);
+          return (
+            <div
+              key={`band-${i}`}
+              title={b.label}
+              style={{
+                position: "absolute", left: `${left}%`, width: `${width}%`,
+                bottom: 2 + (i % 4) * 5, height: 4, borderRadius: 2, background: b.color, opacity: 0.85,
+              }}
+            />
+          );
+        })}
+
         {events.map((ev, i) => {
           const ts = new Date(ev.ts).getTime();
           const left = clamp(((ts - startMs) / durationMs) * 100, 0, 100);
@@ -264,7 +307,7 @@ export default function Timeline({
             <button
               key={i}
               title={`${ev.kind}: ${ev.label}`}
-              aria-label={`${ev.kind}: ${ev.label} at ${new Date(ev.ts).toLocaleString("en-IN", { hour12: false })}`}
+              aria-label={`${ev.kind}: ${ev.label} at ${fmtIST(new Date(ev.ts).getTime())}`}
               onClick={(e) => {
                 e.stopPropagation();
                 setPlaying(false);

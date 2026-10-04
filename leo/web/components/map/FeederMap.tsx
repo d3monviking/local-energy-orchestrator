@@ -82,6 +82,8 @@ export type FeederMapProps = {
   liveDispatchByPhase?: Record<string, { actual_kw: number; soc_after: number; mode: string; rule_triggered: string | null }>;
   /** Count of buses in violation at the current ts, for the parent's banner. */
   onViolatingCount?: (n: number) => void;
+  /** Show what the day-ahead forecast PREDICTED for this interval instead of what happened. */
+  forecast?: boolean;
 };
 
 function voltageColor(v: number, nominal: number, limitPct: number): [number, number, number] {
@@ -138,6 +140,7 @@ export default function FeederMap({
   backupBusIds,
   liveDispatchByPhase,
   onViolatingCount,
+  forecast = false,
 }: FeederMapProps) {
   const [data, setData] = useState<FeederCollection | null>(null);
   // Read from the fetched neighbourhood data (DB's actual nominal_v_ln
@@ -189,7 +192,7 @@ export default function FeederMap({
       return;
     }
     let cancelled = false;
-    fetch(`${CLOUD_API_URL}/api/network_result/${runId}?ts_end=${encodeURIComponent(snappedTs)}`)
+    fetch(`${CLOUD_API_URL}/api/network_result/${runId}?ts_end=${encodeURIComponent(snappedTs)}&forecast=${forecast}`)
       .then((r) => {
         if (!r.ok) throw new Error(`${r.status} ${r.statusText}`);
         return r.json();
@@ -213,7 +216,7 @@ export default function FeederMap({
     return () => {
       cancelled = true;
     };
-  }, [runId, snappedTs, nominalV]);
+  }, [runId, snappedTs, nominalV, forecast]);
 
   const initialViewState = useMemo(() => {
     const [lon, lat] = data?.properties.centroid ?? [77.7942, 13.07];

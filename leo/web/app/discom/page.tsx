@@ -5,7 +5,7 @@ import RecommendationCard, { Recommendation } from "@/components/recommendations
 import { formatRupees } from "@/lib/format";
 
 const CLOUD_API_URL = process.env.NEXT_PUBLIC_CLOUD_API_URL ?? "http://localhost:8030";
-const RUN_IDS = ["normal", "outage"];
+const RUN_IDS = ["normal", "outage", "load_shedding", "surplus"];
 const DFPO_TARGET_SHARE = 0.005; // Karnataka DF/DSM FY26-27 target: 0.5% of peak demand
 
 type RecWithRun = Recommendation & { runId: string };

@@ -15,6 +15,8 @@ from contextlib import asynccontextmanager
 from datetime import datetime
 
 import asyncpg
+
+from cloud import explain
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 
@@ -217,7 +219,7 @@ async def list_runs() -> list[dict]:
 
 
 @app.get("/api/network_result/{run_id}")
-async def network_result_at(run_id: str, ts_end: str) -> dict:
+async def network_result_at(run_id: str, ts_end: str, forecast: bool = False) -> dict:
     """Per-bus, per-phase voltage/loading/violation at the recorded
     timestamp nearest `ts_end` (ISO 8601) for this run — what the map's
     voltage colouring (§8.2) scrubs through. Snaps to the nearest
@@ -225,20 +227,23 @@ async def network_result_at(run_id: str, ts_end: str) -> dict:
     since the timeline component scrubs continuously.
     """
     ts_end_dt = datetime.fromisoformat(ts_end.replace("Z", "+00:00"))
+    # forecast=true: what the day-ahead model PREDICTED for this interval
+    # (stored once per forecast day under its source run), not what happened.
+    src = explain.RUNS.get(run_id, {}).get("forecast_from", run_id) if forecast else run_id
 
     async with pool.acquire() as conn:
         nearest = await conn.fetchrow(
-            """SELECT ts_end FROM network_result WHERE run_id = $1
+            """SELECT ts_end FROM network_result WHERE run_id = $1 AND is_forecast = $3
                ORDER BY abs(extract(epoch from (ts_end - $2::timestamptz))) LIMIT 1""",
-            run_id, ts_end_dt,
+            src, ts_end_dt, forecast,
         )
         if nearest is None:
             raise HTTPException(404, f"no network_result rows for run_id {run_id!r}")
 
         rows = await conn.fetch(
             """SELECT bus_id, phase, voltage_v, loading_pct, violation
-               FROM network_result WHERE run_id = $1 AND ts_end = $2""",
-            run_id, nearest["ts_end"],
+               FROM network_result WHERE run_id = $1 AND ts_end = $2 AND is_forecast = $3""",
+            src, nearest["ts_end"], forecast,
         )
     return {
         "run_id": run_id,
@@ -298,6 +303,41 @@ async def violation_episodes(run_id: str) -> list[dict]:
             "deviation_v": round(over_dev if is_over else under_dev, 1),
         })
     return episodes
+
+
+@app.get("/api/forecast/{run_id}")
+async def forecast_for_run(run_id: str) -> dict:
+    """The saved day-ahead forecast this run's plan was built from."""
+    async with pool.acquire() as conn:
+        return await explain.forecast(conn, run_id)
+
+
+@app.get("/api/predicted_events/{run_id}")
+async def predicted_events_for_run(run_id: str) -> list[dict]:
+    """Events the forecast predicted (with reasons) next to what happened."""
+    async with pool.acquire() as conn:
+        return await explain.predicted_events(conn, run_id)
+
+
+@app.get("/api/action_log/{run_id}")
+async def action_log_for_run(run_id: str) -> list[dict]:
+    """Every decision/action in time order, each with its reason."""
+    async with pool.acquire() as conn:
+        return await explain.action_log(conn, run_id)
+
+
+@app.get("/api/run_catalog")
+async def run_catalog() -> list[dict]:
+    """Display metadata for the recorded runs that actually exist."""
+    async with pool.acquire() as conn:
+        rows = await conn.fetch("SELECT run_id, leo_enabled, sim_start, sim_end, notes FROM run")
+    existing = {r["run_id"]: r for r in rows}
+    return [
+        {"run_id": rid, "label": meta["label"], "leo_enabled": meta["leo"],
+         "sim_start": existing[rid]["sim_start"].isoformat(), "sim_end": existing[rid]["sim_end"].isoformat(),
+         "notes": existing[rid]["notes"]}
+        for rid, meta in explain.RUNS.items() if rid in existing
+    ]
 
 
 @app.get("/api/events/{run_id}")
@@ -535,7 +575,7 @@ async def dr_eligibility_check(
             dbname=os.environ.get("POSTGRES_DB", "leo"),
         )
         try:
-            eligible_pool = eligible_households(conn, phase, date_cls.fromisoformat(event_date), window_start_hour, window_end_hour)
+            eligible_pool = eligible_households(conn, phase, date_cls.fromisoformat(event_date), window_start_hour, window_end_hour, run_id="normal")
             return any(hh.household_id == household_id for hh in eligible_pool)
         finally:
             conn.close()

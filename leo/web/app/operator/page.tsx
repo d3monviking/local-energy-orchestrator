@@ -1,347 +1,283 @@
 "use client";
 
+/**
+ * Operator console. Three columns tell one story:
+ *   left   — what the day-ahead forecast PREDICTED, and why;
+ *   centre — the feeder right now (actual, or what was forecast);
+ *   right  — what LEO DID about it, and why, in time order.
+ * The banner row says what's happening at the playhead in plain words.
+ */
+
 import { useEffect, useMemo, useState } from "react";
 import FeederMap from "@/components/map/FeederMap";
 import Timeline, { TimelineEventKind, TimelineEventMarker } from "@/components/timeline/Timeline";
-import RecommendationCard, { Recommendation } from "@/components/recommendations/RecommendationCard";
+import ForecastPanel from "@/components/operator/ForecastPanel";
+import ActionLog from "@/components/operator/ActionLog";
+import Glossary from "@/components/operator/Glossary";
+import { ActionItem, EVENT_STYLE, Forecast, PredictedEvent, RunMeta, fmtTime, ms } from "@/components/operator/types";
 
 const DT_ID = process.env.NEXT_PUBLIC_DT_ID ?? "DT-0417";
 const CLOUD_API_URL = process.env.NEXT_PUBLIC_CLOUD_API_URL ?? "http://localhost:8030";
-
-type RunInfo = { run_id: string; leo_enabled: boolean; sim_start: string; sim_end: string };
-type DispatchRow = { block_id: string; ts_end: string; setpoint_kw: number; actual_kw: number; soc_after: number; mode: string; rule_triggered: string | null };
-type SensorRow = { sensor_id: string; ts_end: string; voltage_v: number; supply_present: boolean };
-type RawEvent = { ts: string; kind: string };
-type ViolationEpisode = {
-  phase: string; start_ts: string; end_ts: string; n_intervals: number;
-  kind: "overvoltage" | "undervoltage"; worst_voltage_v: number; deviation_v: number;
-};
-type DrEvent = {
-  event_id: string; phase: string; window_start: string; window_end: string;
-  target_kw: number; v_paise_kwh: number; n_sent: number; n_accepted: number; n_holdout: number;
-};
-
-const EVENT_KIND_MAP: Record<string, TimelineEventKind> = {
-  grid_loss: "outage", power_fail: "outage", backup_start: "outage",
-  grid_return: "restoration", restore: "restoration", backup_end: "restoration",
-  overload_trip: "violation",
-  dr_event_start: "dr_event", dr_event_end: "dr_event",
-};
-
-const RUN_LABEL: Record<string, string> = { normal: "With LEO", baseline: "Without LEO", outage: "Outage replay" };
-const RUN_EXPLAINER: Record<string, string> = {
-  normal: "Peak-demand day on an undersized 100 kVA transformer (150 homes, 250V nominal, ±6% limit). Voltage sags below the floor under heavy load. LEO discharges the three batteries per the approved plan and sends SMS DR offers on the worst phase (R). Phase R's undervoltage shrinks from 5.5h to 3.5h (17:00–20:30 IST). Phases Y and B barely move: each battery only has 5.25 kWh usable and empties it, can't recharge mid-day because those phases are already under the floor from 10:00 IST, and gets no DR — a ~11h, 25–33V gap is beyond local fixing, so it's escalated to the DISCOM as a tap-raise recommendation.",
-  baseline: "Identical day, identical households, battery and DR disabled. Phase R undervoltage runs 16:00–21:30 IST — two hours longer than with LEO. Y and B look almost the same as With LEO, because LEO's local resources were too small to change them either.",
-  outage: "Same day, an unplanned 90-minute upstream outage at 14:10 UTC (19:40 IST). Sensors go dark (no readings, not zero voltage), inverters anti-island (disconnect from the dead grid for safety), the backup circuit energises the one registered critical premise, and restoration staggers back on in batches rather than all at once.",
-};
 const PHASES = ["R", "Y", "B"] as const;
 const PHASE_TEXT_COLOR: Record<string, string> = { R: "#e0473e", Y: "#e0a72e", B: "#3ba9ff" };
 
-/** Last row at-or-before `ts`, per group key — a cheap client-side lookup
- * against a day's worth of already-fetched rows, so scrubbing/playing
- * never triggers a new network request. */
-function latestByKey<T extends { ts_end: string }>(
-  rows: T[], keyOf: (r: T) => string, ts: string | null
-): Record<string, T> {
+const RUN_GROUPS: { title: string; runs: string[] }[] = [
+  { title: "Peak day · 27 Apr", runs: ["normal", "baseline"] },
+  { title: "Outages · 27 Apr", runs: ["load_shedding", "outage"] },
+  { title: "Sunny day · 11 Feb", runs: ["surplus", "surplus_baseline"] },
+];
+const SHORT_LABEL: Record<string, string> = {
+  normal: "With LEO", baseline: "Without LEO", load_shedding: "Load shedding", outage: "Unplanned",
+  surplus: "With LEO", surplus_baseline: "Without LEO",
+};
+
+type DispatchRow = { block_id: string; ts_end: string; setpoint_kw: number; actual_kw: number; soc_after: number; mode: string; rule_triggered: string | null };
+type SensorRow = { sensor_id: string; ts_end: string; voltage_v: number | null; supply_present: boolean };
+
+function latestByKey<T extends { ts_end: string }>(rows: T[], keyOf: (r: T) => string, ts: string | null): Record<string, T> {
   if (!ts) return {};
-  const tsMs = new Date(ts).getTime();
+  const t = ms(ts);
   const out: Record<string, T> = {};
   for (const r of rows) {
-    if (new Date(r.ts_end).getTime() > tsMs) continue;
+    if (ms(r.ts_end) > t) continue;
     const k = keyOf(r);
-    if (!out[k] || new Date(r.ts_end).getTime() > new Date(out[k].ts_end).getTime()) out[k] = r;
+    if (!out[k] || ms(r.ts_end) > ms(out[k].ts_end)) out[k] = r;
   }
   return out;
 }
 
-function fmtTime(ts: string) {
-  return new Date(ts).toLocaleTimeString("en-IN", { hour12: false });
-}
+const getJSON = <T,>(path: string, fallback: T): Promise<T> =>
+  fetch(`${CLOUD_API_URL}${path}`).then((r) => (r.ok ? r.json() : fallback)).catch(() => fallback);
+
+type Banner = { tone: "bad" | "warn" | "info" | "ok"; title: string; body: string };
 
 export default function OperatorHome() {
-  const [runs, setRuns] = useState<RunInfo[]>([]);
-  const [selectedRunId, setSelectedRunId] = useState("normal");
+  const [catalog, setCatalog] = useState<RunMeta[]>([]);
+  const [catalogError, setCatalogError] = useState(false);
+  const [runId, setRunId] = useState("normal");
   const [currentTs, setCurrentTs] = useState<string | null>(null);
-  const [events, setEvents] = useState<TimelineEventMarker[]>([]);
-  const [rawEvents, setRawEvents] = useState<RawEvent[]>([]);
-  const [backupBusIds, setBackupBusIds] = useState<Set<string>>(new Set());
-  const [runsError, setRunsError] = useState(false);
+  const [playing, setPlaying] = useState(false);
+  const [seek, setSeek] = useState<{ ts: string; nonce: number } | null>(null);
+  const [forecast, setForecast] = useState<Forecast | null>(null);
+  const [predicted, setPredicted] = useState<PredictedEvent[]>([]);
+  const [actions, setActions] = useState<ActionItem[]>([]);
   const [dispatch, setDispatch] = useState<DispatchRow[]>([]);
   const [sensors, setSensors] = useState<SensorRow[]>([]);
-  const [episodes, setEpisodes] = useState<ViolationEpisode[]>([]);
-  const [drEvents, setDrEvents] = useState<DrEvent[]>([]);
-  const [recs, setRecs] = useState<Recommendation[]>([]);
+  const [backupBusIds, setBackupBusIds] = useState<Set<string>>(new Set());
   const [violatingCount, setViolatingCount] = useState(0);
-  // The DB's actual nominal is 250V, not the 230 a hardcoded fallback
-  // would assume (confirmed in violation_episodes' server fix) - read
-  // from the same feeder fetch FeederMap already makes, not guessed.
-  const [nominalV, setNominalV] = useState(230);
+  const [mapForecast, setMapForecast] = useState(false);
+  const [showGlossary, setShowGlossary] = useState(false);
+  const [limits, setLimits] = useState({ nominal: 250, pct: 6 });
 
   useEffect(() => {
-    fetch(`${CLOUD_API_URL}/api/feeder/${DT_ID}`)
-      .then((r) => r.json())
-      .then((d: { properties: { nominal_v_ln: number } }) => setNominalV(d.properties.nominal_v_ln))
-      .catch(() => {});
+    fetch(`${CLOUD_API_URL}/api/run_catalog`)
+      .then((r) => { if (!r.ok) throw new Error(); return r.json(); })
+      .then(setCatalog)
+      .catch(() => setCatalogError(true));
+    getJSON<{ properties?: { nominal_v_ln: number; v_limit_pct: number } }>(`/api/feeder/${DT_ID}`, {})
+      .then((d) => d.properties && setLimits({ nominal: d.properties.nominal_v_ln, pct: d.properties.v_limit_pct }));
   }, []);
 
-  const loadRuns = () => {
-    setRunsError(false);
-    fetch(`${CLOUD_API_URL}/api/runs`)
-      .then((r) => {
-        if (!r.ok) throw new Error(`${r.status}`);
-        return r.json();
-      })
-      .then(setRuns)
-      .catch(() => {
-        setRuns([]);
-        setRunsError(true);
-      });
-  };
+  const run = catalog.find((r) => r.run_id === runId);
 
   useEffect(() => {
-    loadRuns();
-  }, []);
+    if (!run) return;
+    setCurrentTs(run.sim_start);
+    setForecast(null); setPredicted([]); setActions([]); setDispatch([]); setSensors([]);
+    getJSON<Forecast | null>(`/api/forecast/${run.run_id}`, null).then(setForecast);
+    getJSON<PredictedEvent[]>(`/api/predicted_events/${run.run_id}`, []).then(setPredicted);
+    getJSON<ActionItem[]>(`/api/action_log/${run.run_id}`, []).then(setActions);
+    getJSON<DispatchRow[]>(`/api/dispatch/${run.run_id}`, []).then(setDispatch);
+    getJSON<SensorRow[]>(`/api/sensor_readings/${run.run_id}`, []).then(setSensors);
+    getJSON<{ bus_id: string }[]>(`/api/backup_households/${run.run_id}`, [])
+      .then((rows) => setBackupBusIds(new Set(rows.map((r) => r.bus_id))));
+  }, [run?.run_id]);
 
-  const activeRun = runs.find((r) => r.run_id === selectedRunId);
+  // An unplanned outage can't be on the forecast — add it as a card once it exists in the log.
+  const events: PredictedEvent[] = useMemo(() => {
+    const loss = actions.find((a) => a.kind === "grid_loss" && a.meta?.planned === false);
+    const back = actions.find((a) => a.kind === "grid_return");
+    if (!loss) return predicted;
+    const outageCard: PredictedEvent = {
+      type: "unplanned_outage", phase: null, severity: "high", title: "Unplanned outage — upstream fault",
+      predicted_at: null, start: loss.ts, end: back?.ts ?? loss.ts, worst_ts: loss.ts,
+      why: ["Not forecastable: faults give no warning", "Detected the same interval by all three busbar sensors losing supply"],
+      actual: { start: loss.ts, end: back?.ts ?? loss.ts, worst: null }, worst: null,
+    };
+    return [...predicted, outageCard].sort((a, b) => ms(a.start) - ms(b.start));
+  }, [predicted, actions]);
 
-  const loadRecs = (runId: string) => {
-    fetch(`${CLOUD_API_URL}/api/recommendations/${runId}`).then((r) => r.json()).then(setRecs).catch(() => setRecs([]));
-  };
-
-  useEffect(() => {
-    if (!activeRun) return;
-    setCurrentTs(activeRun.sim_start);
-
-    fetch(`${CLOUD_API_URL}/api/events/${activeRun.run_id}`)
-      .then((r) => r.json())
-      .then((rows: RawEvent[]) => {
-        setRawEvents(rows);
-        setEvents(
-          rows
-            .filter((r) => r.kind in EVENT_KIND_MAP)
-            .map((r) => ({ ts: r.ts, kind: EVENT_KIND_MAP[r.kind], label: r.kind }))
-        );
-      })
-      .catch(() => {
-        setRawEvents([]);
-        setEvents([]);
-      });
-
-    fetch(`${CLOUD_API_URL}/api/backup_households/${activeRun.run_id}`)
-      .then((r) => r.json())
-      .then((rows: { household_id: string; bus_id: string }[]) => setBackupBusIds(new Set(rows.map((r) => r.bus_id))))
-      .catch(() => setBackupBusIds(new Set()));
-
-    // Whole day, fetched once per run rather than re-fetched on every
-    // scrub/play tick — latestByKey() does the "what's true right now"
-    // lookup entirely client-side against this.
-    fetch(`${CLOUD_API_URL}/api/dispatch/${activeRun.run_id}`).then((r) => r.json()).then(setDispatch).catch(() => setDispatch([]));
-    fetch(`${CLOUD_API_URL}/api/sensor_readings/${activeRun.run_id}`).then((r) => r.json()).then(setSensors).catch(() => setSensors([]));
-    fetch(`${CLOUD_API_URL}/api/violation_episodes/${activeRun.run_id}`).then((r) => r.json()).then(setEpisodes).catch(() => setEpisodes([]));
-    fetch(`${CLOUD_API_URL}/api/dr_events/${activeRun.run_id}`).then((r) => r.json()).then(setDrEvents).catch(() => setDrEvents([]));
-    loadRecs(activeRun.run_id);
-  }, [activeRun?.run_id]);
-
-  const liveDispatch = useMemo(
-    () => latestByKey(dispatch, (r) => r.block_id.replace("BATT-", ""), currentTs),
-    [dispatch, currentTs]
-  );
+  const liveDispatch = useMemo(() => latestByKey(dispatch, (r) => r.block_id.replace("BATT-", ""), currentTs), [dispatch, currentTs]);
   const liveVoltage = useMemo(
     () => latestByKey(sensors.filter((s) => s.sensor_id.includes("FAREND")), (r) => r.sensor_id.replace("SEN-FAREND-", ""), currentTs),
     [sensors, currentTs]
   );
-  const lastEvent = useMemo(() => {
-    if (!currentTs) return null;
-    const tsMs = new Date(currentTs).getTime();
-    const past = rawEvents.filter((e) => new Date(e.ts).getTime() <= tsMs);
-    return past.length ? past[past.length - 1] : null;
-  }, [rawEvents, currentTs]);
+  const liveTrafo = useMemo(() => {
+    if (!forecast || !currentTs) return null;
+    const past = forecast.intervals.filter((i) => ms(i.ts_end) <= ms(currentTs) && i.trafo_actual_pct != null);
+    return past.length ? past[past.length - 1].trafo_actual_pct : null;
+  }, [forecast, currentTs]);
 
-  const activeEpisodes = useMemo(() => {
-    if (!currentTs) return [];
-    const tsMs = new Date(currentTs).getTime();
-    return episodes.filter((e) => tsMs >= new Date(e.start_ts).getTime() && tsMs < new Date(e.end_ts).getTime());
-  }, [episodes, currentTs]);
+  const now = currentTs ? ms(currentTs) : 0;
+  const activeItems = actions.filter((a) => a.end && ms(a.ts) <= now && now < ms(a.end));
+  const currentMode = useMemo(() => {
+    const modes = actions.filter((a) => a.kind === "mode" && ms(a.ts) <= now);
+    return modes.length ? String(modes[modes.length - 1].meta.to) : "normal";
+  }, [actions, now]);
 
-  const activeDrEvent = useMemo(() => {
-    if (!currentTs) return null;
-    const tsMs = new Date(currentTs).getTime();
-    return drEvents.find((e) => tsMs >= new Date(e.window_start).getTime() && tsMs < new Date(e.window_end).getTime()) ?? null;
-  }, [drEvents, currentTs]);
+  const banners: Banner[] = useMemo(() => {
+    const out: Banner[] = [];
+    const leoNow = activeItems.filter((a) => a.kind.startsWith("battery_") || a.kind === "dr_window")
+      .map((a) => a.kind === "dr_window" ? "DR window live" : a.title.replace(/ \d\d:\d\d–\d\d:\d\d IST.*$/, ""));
+    const leoText = run?.leo_enabled ? (leoNow.length ? `LEO is: ${leoNow.join(" · ")}.` : "LEO: no battery/DR action this interval.") : "LEO is off on this run.";
+    if (currentMode === "backup" || currentMode === "restoration") {
+      const b = actions.find((a) => a.kind === "backup_start");
+      out.push({ tone: "bad", title: currentMode === "backup" ? "GRID DOWN — running on backup" : "GRID BACK — staggered re-transfer",
+        body: `${b?.title ?? ""}. ${b?.detail ?? ""}` });
+    } else if (currentMode === "pre_outage") {
+      const notice = actions.find((a) => a.kind === "load_shedding_notice");
+      out.push({ tone: "warn", title: "PRE-OUTAGE — load shedding scheduled",
+        body: `${notice?.title ?? ""}. Batteries hold and charge instead of discharging; all households were alerted by SMS.` });
+    }
+    for (const a of activeItems.filter((x) => x.actor === "Network")) {
+      const ev = String(a.meta.type);
+      out.push({ tone: "bad", title: `${(EVENT_STYLE[ev]?.label ?? ev).toUpperCase()}${a.meta.phase ? ` — phase ${a.meta.phase}` : ""}`,
+        body: `${a.title}. ${ev === "transformer_overload" ? "" : `${violatingCount} bus points out of limits right now. `}${leoText}` });
+    }
+    if (!out.length) {
+      const next = events.find((e) => ms(e.start) > now);
+      if (next) {
+        const mins = Math.round((ms(next.start) - now) / 60000);
+        out.push({ tone: "info", title: `Next predicted: ${next.title}`,
+          body: `Expected from ${fmtTime(next.start)} IST (in ${Math.floor(mins / 60)}h ${mins % 60}m). ${leoText}` });
+      } else {
+        out.push({ tone: "ok", title: "All within limits", body: leoText });
+      }
+    }
+    return out;
+  }, [activeItems, currentMode, actions, events, now, violatingCount, run?.leo_enabled]);
 
-  const activeOutage = useMemo(() => {
-    if (selectedRunId !== "outage" || !currentTs) return null;
-    const tsMs = new Date(currentTs).getTime();
-    const loss = rawEvents.find((e) => e.kind === "grid_loss");
-    const restore = rawEvents.find((e) => e.kind === "grid_return");
-    if (!loss) return null;
-    const lossMs = new Date(loss.ts).getTime();
-    const restoreMs = restore ? new Date(restore.ts).getTime() : Infinity;
-    return tsMs >= lossMs && tsMs < restoreMs ? { since: loss.ts } : null;
-  }, [rawEvents, currentTs, selectedRunId]);
+  const markers: TimelineEventMarker[] = actions
+    .filter((a) => ["grid_loss", "grid_return", "load_shedding_notice", "dr_window", "recommendation"].includes(a.kind))
+    .map((a) => ({
+      ts: a.ts, label: a.title,
+      kind: (a.kind === "grid_loss" ? "outage" : a.kind === "grid_return" ? "restoration" : a.kind === "dr_window" ? "dr_event" : "violation") as TimelineEventKind,
+    }));
+  const bands = events.map((e) => ({ startTs: e.start, endTs: e.end, color: EVENT_STYLE[e.type]?.color ?? "#93a1b0", label: `Predicted: ${e.title}` }));
+  const doSeek = (ts: string) => setSeek({ ts, nonce: Date.now() });
+  const floor = limits.nominal * (1 - limits.pct / 100), ceil = limits.nominal * (1 + limits.pct / 100);
 
-  const openRecs = recs.filter((r) => r.status !== "resolved");
+  const TONE: Record<Banner["tone"], string> = {
+    bad: "border-[var(--leo-bad)] bg-[var(--leo-bad)]/15", warn: "border-[var(--leo-warn)] bg-[var(--leo-warn)]/15",
+    info: "border-[var(--leo-accent)] bg-[var(--leo-accent)]/10", ok: "border-[var(--leo-ok)] bg-[var(--leo-ok)]/10",
+  };
+  const TONE_TEXT: Record<Banner["tone"], string> = { bad: "text-[var(--leo-bad)]", warn: "text-[var(--leo-warn)]", info: "text-[var(--leo-accent)]", ok: "text-[var(--leo-ok)]" };
 
   return (
-    <main id="main-content" className="p-6 flex flex-col gap-4 h-[calc(100vh-57px)]">
-      <div className="flex items-start justify-between gap-4">
-        <div>
-          <h1 className="text-lg font-semibold">Map + timeline</h1>
-          <p className="text-sm text-[var(--leo-text-dim)] max-w-2xl">{RUN_EXPLAINER[selectedRunId]}</p>
-        </div>
-
-        <div className="flex rounded-md border border-[var(--leo-border)] overflow-hidden shrink-0">
-          {["normal", "baseline", "outage"].map((runId) => (
-            <button
-              key={runId}
-              onClick={() => setSelectedRunId(runId)}
-              className={`px-3 py-1.5 text-sm ${selectedRunId === runId ? "bg-[var(--leo-accent)] text-black" : "bg-[var(--leo-panel-raised)]"}`}
-            >
-              {RUN_LABEL[runId]}
-            </button>
-          ))}
-        </div>
-      </div>
-
-      {/* Live banner: outage > voltage violation > DR event, in that
-          priority order, so the most operationally urgent thing at the
-          current scrub position is what's shown — not everything
-          stacked at once. */}
-      {activeOutage && (
-        <div role="alert" className="rounded-md border border-[var(--leo-bad)] bg-[var(--leo-bad)]/15 px-4 py-3 text-sm flex items-center gap-3">
-          <span className="font-semibold text-[var(--leo-bad)]">⚠ UPSTREAM OUTAGE</span>
-          <span>
-            Since {fmtTime(activeOutage.since)} IST — sensors dark, inverters anti-islanded. Backup circuit energised for
-            the registered critical premise.
-          </span>
-          <span className="ml-auto text-[var(--leo-text-dim)]">see Actions →</span>
-        </div>
-      )}
-      {!activeOutage && activeEpisodes.length > 0 && (
-        <div role="alert" className="rounded-md border border-[var(--leo-bad)] bg-[var(--leo-bad)]/15 px-4 py-3 text-sm flex items-center gap-3 flex-wrap">
-          <span className="font-semibold text-[var(--leo-bad)]">⚠ VOLTAGE VIOLATION</span>
-          {activeEpisodes.map((e) => (
-            <span key={e.phase}>
-              Phase {e.phase} {e.kind} — {e.worst_voltage_v}V (
-              {e.kind === "undervoltage" ? "−" : "+"}{e.deviation_v}V vs {nominalV}V nominal), since {fmtTime(e.start_ts)} IST
-            </span>
-          ))}
-          <span className="ml-auto text-[var(--leo-text-dim)]">{violatingCount} buses affected right now · see Actions →</span>
-        </div>
-      )}
-      {!activeOutage && activeEpisodes.length === 0 && activeDrEvent && (
-        <div className="rounded-md border border-[var(--leo-accent)] bg-[var(--leo-accent)]/10 px-4 py-3 text-sm flex items-center gap-3">
-          <span className="font-semibold text-[var(--leo-accent)]">DR EVENT LIVE</span>
-          <span>
-            Phase {activeDrEvent.phase}, target {activeDrEvent.target_kw.toFixed(1)}kW — {activeDrEvent.n_sent} offers sent,{" "}
-            {activeDrEvent.n_accepted} accepted, {activeDrEvent.n_holdout} held out for verification.
-          </span>
-        </div>
-      )}
-
-      <div className="flex-1 min-h-0 flex gap-4">
-        <div className="flex-1 min-w-0">
-          <FeederMap
-            dtId={DT_ID}
-            runId={activeRun?.run_id}
-            ts={currentTs ?? undefined}
-            backupBusIds={backupBusIds}
-            liveDispatchByPhase={liveDispatch}
-            onViolatingCount={setViolatingCount}
-          />
-        </div>
-
-        {/* Actions sidebar: every open DISCOM recommendation for this
-            run, live. This is the whole Approve/Acknowledge/Dispatch
-            workflow that exists today — there is no Reject path yet
-            (confirmed against the schema and API, not just the UI), so
-            this doesn't pretend to have one. */}
-        <aside className="w-80 shrink-0 flex flex-col gap-3 overflow-y-auto">
-          <h2 className="text-sm font-medium text-[var(--leo-text-dim)]">Actions ({openRecs.length})</h2>
-          {openRecs.length === 0 && (
-            <p className="text-sm text-[var(--leo-text-dim)]">No open recommendations for this run.</p>
-          )}
-          {openRecs.map((r) => (
-            <RecommendationCard key={r.rec_id} runId={activeRun!.run_id} rec={r} onAdvance={() => loadRecs(activeRun!.run_id)} />
-          ))}
-          {recs.filter((r) => r.status === "resolved").length > 0 && (
-            <>
-              <h2 className="text-sm font-medium text-[var(--leo-text-dim)] mt-2">Resolved</h2>
-              {recs.filter((r) => r.status === "resolved").map((r) => (
-                <div key={r.rec_id} className="opacity-60">
-                  <RecommendationCard runId={activeRun!.run_id} rec={r} />
-                </div>
-              ))}
-            </>
-          )}
-        </aside>
-      </div>
-
-      {activeRun && (
-        <div className="flex items-stretch gap-3 text-xs shrink-0">
-          {PHASES.map((p) => {
-            const v = liveVoltage[p];
-            const d = liveDispatch[p];
-            const violating = v && Math.abs(v.voltage_v - nominalV) / nominalV > 0.06;
-            return (
-              <div
-                key={p}
-                className="flex-1 rounded-md border border-[var(--leo-border)] bg-[var(--leo-panel)] px-3 py-2 flex items-center gap-3"
-              >
-                <span className="font-semibold" style={{ color: PHASE_TEXT_COLOR[p] }}>
-                  {p}
-                </span>
-                <span className={violating ? "text-[var(--leo-bad)]" : "text-[var(--leo-text)]"}>
-                  {v && v.supply_present ? `${v.voltage_v.toFixed(1)}V far-end` : v ? "no supply" : "—"}
-                </span>
-                <span className="text-[var(--leo-text-dim)]">
-                  {d
-                    ? `batt ${d.actual_kw >= 0 ? "discharge" : "charge"} ${Math.abs(d.actual_kw).toFixed(1)}kW · SoC ${(d.soc_after * 100).toFixed(0)}%`
-                    : "—"}
-                </span>
-                {d?.rule_triggered && (
-                  <span className="ml-auto rounded-full bg-[var(--leo-warn)]/20 text-[var(--leo-warn)] px-2 py-0.5">
-                    {d.rule_triggered}
-                  </span>
-                )}
+    <main id="main-content" className="px-4 py-3 flex flex-col gap-3 h-[calc(100vh-57px)] min-h-[720px]">
+      <div className="flex flex-wrap items-center gap-3">
+        <h1 className="text-base font-semibold mr-2">Operator console</h1>
+        {RUN_GROUPS.map((g) => {
+          const avail = g.runs.filter((r) => catalog.some((c) => c.run_id === r));
+          if (!avail.length) return null;
+          return (
+            <div key={g.title} className="flex items-center gap-1.5">
+              <span className="text-[11px] text-[var(--leo-text-dim)]">{g.title}</span>
+              <div className="flex rounded-md border border-[var(--leo-border)] overflow-hidden">
+                {avail.map((r) => (
+                  <button key={r} onClick={() => setRunId(r)}
+                    className={`px-2.5 py-1 text-xs ${runId === r ? "bg-[var(--leo-accent)] text-black" : "bg-[var(--leo-panel-raised)]"}`}>
+                    {SHORT_LABEL[r]}
+                  </button>
+                ))}
               </div>
-            );
-          })}
-          <div className="flex-1 rounded-md border border-[var(--leo-border)] bg-[var(--leo-panel)] px-3 py-2 flex items-center">
-            <span className="text-[var(--leo-text-dim)]">
-              {lastEvent
-                ? `last event: ${lastEvent.kind} at ${fmtTime(lastEvent.ts)}`
-                : "no events yet"}
-            </span>
+            </div>
+          );
+        })}
+        <button onClick={() => setShowGlossary(true)}
+          className="ml-auto text-xs rounded-md border border-[var(--leo-border)] px-2.5 py-1 hover:border-[var(--leo-accent)]">
+          What am I looking at?
+        </button>
+      </div>
+
+      {catalogError && (
+        <div role="alert" className="text-sm text-[var(--leo-bad)]">Couldn&apos;t reach the cloud API — is the stack running?</div>
+      )}
+
+      <div className="flex flex-col gap-1.5" role="status" aria-live="polite">
+        {banners.map((b, i) => (
+          <div key={i} className={`rounded-md border px-3 py-2 text-sm flex gap-3 items-baseline ${TONE[b.tone]}`}>
+            <span className={`font-semibold whitespace-nowrap ${TONE_TEXT[b.tone]}`}>{b.title}</span>
+            <span className="text-[var(--leo-text)]">{b.body}</span>
           </div>
+        ))}
+      </div>
+
+      {run && (
+        <div className="flex-1 min-h-0 grid grid-cols-1 lg:grid-cols-[300px_minmax(0,1fr)_360px] gap-3">
+          <ForecastPanel forecast={forecast} events={events} actions={actions} startTs={run.sim_start} endTs={run.sim_end}
+            currentTs={currentTs} leoEnabled={run.leo_enabled} onSeek={doSeek} />
+
+          <div className="flex flex-col gap-2 min-h-[360px]">
+            <div className="flex items-center gap-2 text-xs">
+              <span className="text-[var(--leo-text-dim)]">Map shows</span>
+              <div className="flex rounded-md border border-[var(--leo-border)] overflow-hidden">
+                {[false, true].map((f) => (
+                  <button key={String(f)} onClick={() => setMapForecast(f)}
+                    className={`px-2 py-0.5 ${mapForecast === f ? "bg-[var(--leo-accent)] text-black" : "bg-[var(--leo-panel-raised)]"}`}>
+                    {f ? "Forecast (predicted the day before)" : "What actually happened"}
+                  </button>
+                ))}
+              </div>
+              <span className="ml-auto text-[var(--leo-text-dim)]">Mode: <span className="text-[var(--leo-text)] font-medium">{currentMode.replace("_", "-")}</span></span>
+            </div>
+            <div className="flex-1 min-h-0">
+              <FeederMap dtId={DT_ID} runId={run.run_id} ts={currentTs ?? undefined} backupBusIds={backupBusIds}
+                liveDispatchByPhase={liveDispatch} onViolatingCount={setViolatingCount} forecast={mapForecast} />
+            </div>
+            <div className="grid grid-cols-2 xl:grid-cols-4 gap-2 text-xs">
+              {PHASES.map((p) => {
+                const v = liveVoltage[p];
+                const d = liveDispatch[p];
+                const bad = v?.voltage_v != null && (v.voltage_v < floor || v.voltage_v > ceil);
+                const act = !d ? "—" : d.mode === "backup" ? "backup port" : d.actual_kw > 0.05 ? `discharging ${d.actual_kw.toFixed(1)} kW`
+                  : d.actual_kw < -0.05 ? `charging ${(-d.actual_kw).toFixed(1)} kW` : "idle";
+                return (
+                  <div key={p} className="rounded-md border border-[var(--leo-border)] bg-[var(--leo-panel)] px-2.5 py-1.5">
+                    <div className="flex items-center gap-2">
+                      <span className="font-semibold" style={{ color: PHASE_TEXT_COLOR[p] }}>Phase {p}</span>
+                      <span className={bad ? "text-[var(--leo-bad)] font-medium" : ""}>
+                        {v ? (v.supply_present && v.voltage_v != null ? `${v.voltage_v.toFixed(0)} V far end` : "no supply") : "—"}
+                      </span>
+                    </div>
+                    <div className="text-[var(--leo-text-dim)]">
+                      Battery {act}{d && d.mode !== "backup" ? ` · ${(d.soc_after * 100).toFixed(0)}%` : ""}
+                      {d?.rule_triggered && <span className="text-[var(--leo-warn)]"> · {d.rule_triggered.replace(/_/g, " ")}</span>}
+                    </div>
+                  </div>
+                );
+              })}
+              <div className="rounded-md border border-[var(--leo-border)] bg-[var(--leo-panel)] px-2.5 py-1.5">
+                <div className="font-semibold">Transformer</div>
+                <div className={liveTrafo != null && liveTrafo > 100 ? "text-[var(--leo-bad)] font-medium" : "text-[var(--leo-text-dim)]"}>
+                  {liveTrafo != null ? `${liveTrafo.toFixed(0)}% of rating` : currentMode === "backup" ? "de-energised" : "—"}
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <ActionLog items={actions} currentTs={currentTs} startTs={run.sim_start} playing={playing} onSeek={doSeek} />
         </div>
       )}
 
-      {activeRun && (
-        <Timeline
-          key={activeRun.run_id}
-          runId={activeRun.run_id}
-          startTs={activeRun.sim_start}
-          endTs={activeRun.sim_end}
-          segments={[{ kind: "recorded", startTs: activeRun.sim_start, endTs: activeRun.sim_end }]}
-          events={events}
-          initialTs={activeRun.sim_start}
-          onScrub={setCurrentTs}
-        />
+      {run && (
+        <Timeline key={run.run_id} runId={run.run_id} startTs={run.sim_start} endTs={run.sim_end}
+          segments={[{ kind: "recorded", startTs: run.sim_start, endTs: run.sim_end }]}
+          events={markers} bands={bands} initialTs={run.sim_start} onScrub={setCurrentTs}
+          seekTo={seek} onPlayingChange={setPlaying} />
       )}
-      {!activeRun && runsError && (
-        <div role="alert" className="flex items-center gap-3 text-sm text-[var(--leo-bad)]">
-          <span>Couldn&apos;t load runs from the cloud API.</span>
-          <button onClick={loadRuns} className="underline">
-            Retry
-          </button>
-        </div>
-      )}
-      {!activeRun && !runsError && (
-        <p className="text-sm text-[var(--leo-text-dim)]">
-          No recorded run yet — run <code>python -m sim.loop</code> to produce one.
-        </p>
-      )}
+
+      {showGlossary && <Glossary runId={runId} onClose={() => setShowGlossary(false)} />}
     </main>
   );
 }
