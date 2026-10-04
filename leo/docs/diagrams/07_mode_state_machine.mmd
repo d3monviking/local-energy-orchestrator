@@ -1,0 +1,17 @@
+%% Operating modes, with the trigger and the component that owns each transition.
+stateDiagram-v2
+    [*] --> Normal
+    Normal --> PreOutage: C7 — DISCOM load-shedding notice
+    PreOutage --> Normal: C7 — notice withdrawn
+    PreOutage --> Backup: C9 — grid lost at the cut
+    Normal --> Backup: C9 — unplanned fault (all sensors dark)
+    Backup --> Restoration: C9 — grid returns
+    Restoration --> Normal: C9 → C7 — staggered re-transfer complete
+    Normal: Normal (C7)
+    Normal: shave evening peak, charge midday, DR on stress days
+    PreOutage: Pre-outage (C7)
+    PreOutage: reserve = backup need ×1.5, keep shaving with the rest
+    Backup: Backup (C9)
+    Backup: inverters islanded on the backup circuit only, premises by priority
+    Restoration: Restoration (C9)
+    Restoration: batched re-transfer to avoid cold-load pickup

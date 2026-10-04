@@ -1,0 +1,25 @@
+%% Announced load shedding: Pre-outage, cut, backup, staggered restoration.
+sequenceDiagram
+    autonumber
+    participant D as DISCOM
+    participant C7 as Battery orchestrator (C7)
+    participant C14 as Messaging (C14)
+    participant HH as Households
+    participant BAT as Battery blocks
+    participant SEN as Sensors (C1)
+    participant C9 as Outage + backup (C9)
+    participant CP as Critical premises (6)
+    D->>C7: load-shedding notice (14:00): cut 19:40–21:10
+    C7->>C7: mode Normal → Pre-outage (owner C7)
+    C7->>BAT: raise floor to backup need ×1.5, keep shaving with the rest
+    C14->>HH: SMS to 150 homes: charge phones / inverters now
+    D->>SEN: 19:40 supply cut
+    SEN->>C9: power-fail on all 6 sensors (instant)
+    BAT->>BAT: inverters anti-island (IEC 62116), grid relay opens
+    C9->>C9: mode → Backup (owner C9)
+    C9->>CP: set current limits by priority (clinic 16 A first)
+    BAT->>CP: supply over the backup circuit only
+    D->>SEN: 21:10 supply restored
+    C9->>C9: mode → Restoration
+    C9->>CP: re-transfer to grid in batches (no cold-load surge)
+    C9->>C7: mode → Normal, hand back to planning

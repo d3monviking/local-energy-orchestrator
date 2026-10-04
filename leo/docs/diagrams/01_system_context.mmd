@@ -1,0 +1,35 @@
+%% C4 level 1: who LEO talks to. The dashed boundary is the operator's: LEO commands only what is inside it.
+flowchart LR
+    KERC["<b>KERC</b><br/>DF/DSM Regulations 2026<br/>DFPO target 0.5% → 2.0% of peak"]
+    DISCOM["<b>DISCOM (BESCOM)</b><br/>owns the LV network, transformer, meters<br/>must procure flexibility or pay ₹2,000/kW-yr"]
+    AMISP["<b>AMISP / MDMS</b><br/>15-min smart-meter data<br/>arrives T+8 to 24 h"]
+    IVA["<b>Independent verification agency</b><br/>IPMVP Option C baselines"]
+    EXT["<b>Public feeds</b><br/>weather forecast (Open-Meteo)<br/>IEX DAM/RTM prices"]
+    HH["<b>Households (150)</b><br/>consent · SMS / IVR offers<br/>smart pump relays · AC IR controllers"]
+    CP["<b>Critical premises (6)</b><br/>clinic · water pump · tuition centre · shops"]
+
+    subgraph OP["Operator boundary — local cooperative / NGO, registered DF aggregator. LEO commands only these assets"]
+        direction TB
+        LEO["<b>LEO platform</b><br/>edge gateway + operator cloud"]
+        ASSETS["<b>Operator-owned assets</b><br/>6 LoRa voltage/outage sensors + 3 busbar CTs<br/>3 × 60 kWh second-life LFP blocks, 15 kW inverters<br/>backup circuit + dual-source premise meters"]
+        LEO -- "setpoints, modes" --> ASSETS
+        ASSETS -- "voltage, current, SoC" --> LEO
+    end
+
+    KERC -- "targets, penalty" --> DISCOM
+    EXT -- "forecasts, prices" --> LEO
+    DISCOM -- "consented meter data (via AMISP)" --> AMISP
+    AMISP -- "day-late meter files" --> LEO
+    LEO -- "recommendations: tap change, outage scope" --> DISCOM
+    DISCOM -- "DFPO capacity + evening-energy payment" --> LEO
+    LEO -- "verified kW / kWh records" --> IVA
+    IVA -- "verification" --> DISCOM
+    LEO <-- "offers, alerts, rewards · device schedules" --> HH
+    ASSETS -- "backup supply during outages" --> CP
+    DISCOM -. "switches its own network; LEO never does" .-> HH
+
+    classDef ext fill:#f6f8fa,stroke:#57606a,color:#1f2328
+    classDef leo fill:#ddf0ff,stroke:#0969da,color:#1f2328
+    class KERC,DISCOM,AMISP,IVA,EXT,HH,CP ext
+    class LEO,ASSETS leo
+    style OP fill:#f3f9ff,stroke:#0969da,stroke-dasharray: 6 4,color:#0969da

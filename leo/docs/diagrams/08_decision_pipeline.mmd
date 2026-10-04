@@ -1,0 +1,13 @@
+%% The planning chain; each stage's reason is what the operator console shows.
+flowchart LR
+    F["<b>1. Forecast</b><br/>P10/P50/P90 load + PV per phase<br/><i>why: weather, calendar, history</i>"]
+    N["<b>2. Network model</b><br/>3-phase power flow on the forecast<br/><i>why: which bus, which hour, how far off limit</i>"]
+    B["<b>3. Battery plan</b><br/>water-fill: midday trough in, evening peak out<br/><i>why: highest-load intervals cut most</i>"]
+    R["<b>4. DR for the residual</b><br/>stress day? pumps shifted daily, AC event,<br/>SMS offers chosen by LinUCB"]
+    A["<b>5. Operator approval</b><br/>D-1 23:30"]
+    L["<b>6. Live correction</b><br/>re-solve every 15 min from CT + sensors;<br/>overvoltage → absorb; outage → backup"]
+    E["<b>7. Escalate</b><br/>residual violation → tap-change recommendation"]
+    S["<b>8. Settle (D+1)</b><br/>IPMVP baselines, holdout,<br/>DR payments, pooled rewards"]
+    F --> N --> B --> R --> A --> L --> S
+    L --> E
+    N -. "residual gap" .-> E

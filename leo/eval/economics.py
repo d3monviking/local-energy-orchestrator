@@ -239,7 +239,21 @@ def evaluate(cfg_name: str, cfg: dict, phys: dict, base: dict, A: dict, n_backup
         "trips_base": base["trips"], "trips": phys["trips"],
         "solar_absorbed_kwh": phys["absorbed_export_kwh"], "solar_export_kwh": phys["export_kwh"],
     }
+    # Who gets what: DR payments go to participants; Streams 1-2 (what is
+    # left of the alpha budget) to everyone by the pooling rules.
+    streams_rs = max(0.0, payouts - dr_paid)
+    tod_gain = (t["domestic_tod_solar_saving_pct"] + t["domestic_tod_peak_surcharge_pct"]) / 100.0
+    per_pump_kwh = phys["dr_pump_shift_kwh"] / n_pumps if n_pumps else 0.0
+    per_household = {
+        "pump_home_fee_rs": 12 * sdc.get("pump_fee_rs_per_month", 0) if n_pumps else 0.0,
+        "pump_home_tod_saving_rs": per_pump_kwh * t["domestic_rs_per_kwh"] * tod_gain if n_pumps else 0.0,
+        "ac_home_event_pay_rs": phys["dr_ac_paid_rs"] / n_acs if n_acs else 0.0,
+        "sms_dr_rs_per_household": phys["dr_incentive_rs"] / hh_n,
+        "streams_rs_per_household": streams_rs / hh_n,
+        "n_pump_homes": n_pumps, "n_ac_homes": n_acs,
+    }
     households = {
+        "per_household": per_household,
         "payouts_total_rs": payouts,
         "payout_per_household_rs": payouts / hh_n,
         "dr_incentives_rs": dr_paid,
@@ -290,7 +304,11 @@ def run(sweep_id: str) -> dict:
     configs = sweep["params"]["configs"]
     n_backup = len(sweep["params"]["backup_premises"])
     from eval.sweep import smart_enrolment
-    n_pumps, n_acs = smart_enrolment()
+    from world.feeder import load_scenario
+    sp = sweep["params"].get("scenario_path")
+    n_pumps, n_acs = smart_enrolment(load_scenario(Path(sp)) if sp else None)
+    if sweep["params"].get("transformer_kva"):
+        A["neighbourhood"]["transformer_kva"] = sweep["params"]["transformer_kva"]
     for name in phys:
         phys[name]["smart_pumps"], phys[name]["smart_acs"] = n_pumps, n_acs
     base = phys["baseline"]
@@ -361,7 +379,8 @@ def run(sweep_id: str) -> dict:
     for res in results:
         res["sensitivity"] = sensitivity(res["config"], configs[res["config"]], phys[res["config"]], base, A, n_backup)
 
-    out = {"sweep_id": sweep_id, "assumptions": A,
+    out = {"sweep_id": sweep_id, "assumptions": A, "scenario_name": sweep["params"].get("scenario_name"),
+           "appliance_shares": sweep["params"].get("appliance_shares"),
            "assumptions_yaml": (HERE.parent / "economics.yaml").read_text(), "scale_to_year": sweep["params"]["scale_to_year"],
            "weeks": sweep["params"]["weeks"], "backup_premises": sweep["params"]["backup_premises"],
            "recommended": best["config"],

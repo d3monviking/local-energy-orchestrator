@@ -1,0 +1,80 @@
+# Urban variant of scenario.yaml (eval/sweep.py --scenario scenario_urban.yaml).
+# Same street grid, households and random draws; only appliance shares and
+# the transformer rating change, so differences come from the setting alone.
+# World-builder configuration. Read by world/build.py.
+# Section 7.1 / §9.2 of the Build Specification.
+
+neighbourhood:
+  name: "Urban variant - same Hoskote street grid, higher-income urban appliance mix"
+  bbox: [77.7930, 13.0688, 77.7955, 13.0710]   # [min_lon, min_lat, max_lon, max_lat]
+  centroid_lat: 13.0700
+  centroid_lon: 77.7942
+  osm_cache: "world/data/hoskote_raw.osm"      # raw extract via OSM API, see world/feeder.py
+  dt_id: "DT-0417"
+  transformer_kva: 200   # research: urban DTs are most commonly 100 or 200 kVA
+  nominal_v_ln: 250.0
+  v_limit_pct: 6.0       # (verify) Karnataka supply code
+
+households:
+  count: 150   # raised from 60: models a DT that outgrew its original sizing via
+               # organic consumer growth without augmentation. 120 got within 0.5%
+               # of the voltage limit at the year's peak demand; 150 (near the max
+               # the cached OSM extract's 186 buildings support) reliably crosses it.
+  shares:
+    has_pv: 0.25
+    has_ac: 0.45        # (verify) research: 8% nationally, concentrated in higher-income urban homes
+    has_cooler: 0.20
+    has_pump: 0.30      # (verify) sump / overhead-tank pumps common in urban Bengaluru
+    has_inverter: 0.10
+    is_business: 0.10
+
+battery_blocks:
+  - {phase: R, capacity_kwh: 60, power_kw: 15}
+  - {phase: Y, capacity_kwh: 60, power_kw: 15}
+  - {phase: B, capacity_kwh: 60, power_kw: 15}
+
+sim:
+  date_start: "2025-09-25"
+  date_end: "2026-09-25"
+  seed: 42
+
+outages:
+  esmi_rate_per_year: null   # fitted from Prayas ESMI stats for the region
+
+sensors:
+  count: 6   # 3 busbar (one per phase) + 3 far-end (one per phase)
+
+# Premises wired to the operator's backup circuit (Architecture §C3), in
+# addition to any household registered critical in the feeder (HH-056,
+# the clinic). Two per phase so every block has premises to protect.
+# (verify) which premises a real neighbourhood would register.
+backup_circuit:
+  premises:
+    - {household_id: HH-136, critical_class: water}       # Y, borewell pump for the lane
+    - {household_id: HH-083, critical_class: education}   # B, tuition centre
+    - {household_id: HH-069, critical_class: livelihood}  # R, shop
+    - {household_id: HH-097, critical_class: livelihood}  # Y, shop
+    - {household_id: HH-014, critical_class: livelihood}  # B, shop
+
+# Scheduled DISCOM load shedding on the evening ramp when the state is
+# short of power (§14). (verify) frequency against BESCOM's published
+# schedules; summer 2024 saw rostered evening cuts in rural Karnataka.
+load_shedding:
+  months: [3, 4, 5]
+  weekdays_in_sample: [2, 5]   # two cuts in each sampled summer week
+  start_ist: "19:30"
+  duration_min: 90
+  notice_hours: 5
+
+# Automated demand response (smart relays on pumps, smart AC controllers),
+# opt-in, opt-out per event. (verify all) against Indian smart-AC / DR pilots.
+smart_dr:
+  pump_relay_share: 0.7        # of pump owners enrolled: pump moved from 18-19 IST to LEO's midday window
+  ac_controller_share: 0.6     # of AC owners enrolled: AC cycled down on DFPO event days
+  ac_curtail_frac: 0.6         # AC duty cut during an event (cycles to 40%)
+  precool_frac: 0.3            # share of curtailed energy spent pre-cooling in the 2 h before
+  rebound_frac: 0.2            # share consumed in the 2 h after
+  ac_event_payment_rs: 75      # flat, per event, per participating home
+  override_prob: 0.10          # household overrides an AC event
+  pump_override_prob: 0.05     # household runs the pump at the usual time anyway
+  shift_window_ist: [10, 15]   # LEO picks the 1-hour slot with the most forecast solar surplus

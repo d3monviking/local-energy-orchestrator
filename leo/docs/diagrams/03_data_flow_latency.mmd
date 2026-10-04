@@ -1,0 +1,30 @@
+%% Every arrow carries its timing. Meter data is a day late, so LEO plans day-ahead and corrects live from its own sensors.
+flowchart LR
+    WX["Weather forecast<br/>(every 6 h)"]
+    IEX["IEX prices<br/>(day-ahead)"]
+    MDM["Smart meters → MDMS"]
+    SEN["LoRa voltage sensors"]
+    CT["Busbar CTs"]
+    BAT["Battery inverters"]
+    FC["Forecast<br/>P10/P50/P90"]
+    NM["Network model"]
+    PLAN["Battery + DR plan"]
+    OPS["Operator approval"]
+    LIVE["Live correction"]
+    SET["Settlement + rewards"]
+    DSC["DISCOM"]
+
+    WX -- "D-1, 19:30 run" --> FC
+    MDM -- "15-min data, T+8 to 24 h" --> FC
+    MDM -- "T+8 to 24 h" --> SET
+    FC -- "D-1 19:30" --> NM
+    NM -- "violations, safe limits" --> PLAN
+    IEX -- "price curve" --> PLAN
+    PLAN -- "draft, D-1" --> OPS
+    OPS -- "approved D-1 23:30;<br/>DR offers sent" --> LIVE
+    SEN -- "every minute;<br/>power-fail instant" --> LIVE
+    CT -- "every 15 min" --> LIVE
+    LIVE -- "setpoint every 15 min" --> BAT
+    BAT -- "SoC, kW each 15 min" --> SET
+    SET -- "D+1 morning; payouts monthly" --> DSC
+    LIVE -- "recommendations as needed" --> DSC

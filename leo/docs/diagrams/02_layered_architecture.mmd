@@ -1,0 +1,50 @@
+%% Three tiers with component numbers (System Architecture v3.0, updated to the current build) and the protocol on each link.
+flowchart TB
+    EXTD["Weather forecast · IEX prices · DISCOM IES meter files"]
+    subgraph CLOUD["Operator cloud — not time-critical"]
+        direction LR
+        C10["<b>C10</b> data connectors"]
+        C11["<b>C11</b> training service"]
+        C8["<b>C8</b> DR engine<br/>LinUCB offers +<br/>automated programmes"]
+        C14["<b>C14</b> messaging<br/>and consent"]
+        C12["<b>C12</b> settlement + pooling<br/>IPMVP baselines, ledger"]
+        C13["<b>C13</b> recommendations<br/>to the DISCOM"]
+        C15["<b>C15</b> operator console ·<br/>DISCOM dashboard · impact"]
+    end
+    subgraph EDGE["Neighbourhood edge gateway — keeps working if the internet drops"]
+        direction LR
+        C4["<b>C4</b> ingestion<br/>and store"]
+        C5["<b>C5</b> forecasting<br/>LightGBM P10/P50/P90 + pvlib"]
+        C6["<b>C6</b> network model<br/>pandapower 3-phase"]
+        C7["<b>C7</b> battery orchestrator<br/>peak-shave + 15-min re-solve"]
+        C9["<b>C9</b> outage detection<br/>+ backup allocation"]
+    end
+    subgraph FIELD["Field — operator-owned hardware"]
+        direction LR
+        C1["<b>C1</b> 6 voltage/outage sensors<br/>3 busbar with CT + 3 far-end"]
+        C2["<b>C2</b> 3 single-phase blocks<br/>60 kWh LFP · 15 kW inverter"]
+        C3["<b>C3</b> backup circuit<br/>6 premises, dual-source meters"]
+        DEV["<b>DR devices</b><br/>16 A plugs on pumps<br/>IR blasters on ACs"]
+    end
+    PEOPLE["Households · DISCOM operations"]
+
+    EXTD -- "REST" --> C10
+    C10 -- "MQTT / REST over 4G" --> C4
+    C11 -- "models" --> C5
+    C4 --> C5 --> C6 --> C7
+    C4 --> C9 --> C7
+    C6 -- "kW gap" --> C8
+    C1 -- "LoRaWAN → MQTT<br/>per minute, events instant" --> C4
+    C7 -- "Modbus TCP<br/>setpoint / SoC" --> C2
+    C9 -- "Modbus RTU<br/>current limits" --> C3
+    C8 -- "device cloud API" --> DEV
+    C8 --> C14
+    C14 -- "SMS / IVR" --> PEOPLE
+    EDGE -- "dispatch, sensor, outage logs" --> C12
+    C12 --> C15
+    C13 -- "dashboard · API · SMS" --> PEOPLE
+    EDGE -- "residual gap, outage scope" --> C13
+
+    style FIELD fill:#effaf2,stroke:#1a7f37,color:#1a7f37
+    style EDGE fill:#f3f9ff,stroke:#0969da,color:#0969da
+    style CLOUD fill:#f8f3ff,stroke:#8250df,color:#8250df

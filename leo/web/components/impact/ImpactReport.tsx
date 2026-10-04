@@ -24,7 +24,7 @@ type Result = {
     grant_pct_needed_at_discom_max_rate?: number | null; npv_at_discom_max_rate?: number;
   };
   discom: Dict & { net: number; max_rate_rs_per_kwh: number | null; npv: number; gross_saving: number };
-  households: Dict;
+  households: Dict & { per_household?: Record<string, number> };
   reliability: Record<string, number | null>;
   system_npv: number;
   system_thresholds: Record<string, number | null>;
@@ -35,7 +35,7 @@ type Monthly = {
   discharge_kwh: number; dr_kwh: number; undervoltage_cust_h: number; crit_out_h: number; crit_served_h: number;
 };
 type Impact = {
-  sweep_id: string; computed_at: string; scale_to_year: number; weeks: string[][]; recommended: string;
+  sweep_id: string; computed_at: string; scenario_name?: string; scale_to_year: number; weeks: string[][]; recommended: string;
   recommended_storage?: string;
   viable: string[]; results: Result[]; monthly: Monthly[]; assumptions: Record<string, Dict>;
   assumptions_yaml: string; backup_premises: { household_id: string; critical_class: string; phase: string }[];
@@ -277,13 +277,17 @@ export default function ImpactReport() {
   const [data, setData] = useState<Impact | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [config, setConfig] = useState<string | null>(null);
+  const [sweep, setSweep] = useState<"year" | "urban">("year");
 
   useEffect(() => {
-    fetch(`${CLOUD_API_URL}/api/impact`)
+    fetch(`${CLOUD_API_URL}/api/impact?sweep_id=${sweep}`)
       .then(async (r) => (r.ok ? r.json() : Promise.reject(await r.text())))
-      .then((d: Impact) => { setData(d); setConfig(d.recommended_storage ?? d.recommended); })
+      .then((d: Impact) => {
+        setData(d);
+        setConfig((c) => (c && d.results.some((x) => x.config === c) ? c : d.recommended_storage ?? d.recommended));
+      })
       .catch((e) => setError(String(e)));
-  }, []);
+  }, [sweep]);
 
   const r = useMemo(() => data?.results.find((x) => x.config === config) ?? null, [data, config]);
 
@@ -293,13 +297,24 @@ export default function ImpactReport() {
   const rel = r.reliability;
   const o = r.operator;
   const days = data.weeks.length * 7;
-  const evRef = 100 * 0.95;
+  const evRef = (data.assumptions.neighbourhood?.transformer_kva ?? 100) * 0.95;
   const maxNpv = Math.max(...r.sensitivity.map((s) => Math.abs(s.operator_npv)), Math.abs(o.npv)) || 1;
 
   return (
     <main id="main-content" className="p-6 max-w-6xl flex flex-col gap-6">
       <header>
-        <h1 className="text-lg font-semibold">Impact &amp; economics</h1>
+        <div className="flex flex-wrap items-center gap-3">
+          <h1 className="text-lg font-semibold">Impact &amp; economics</h1>
+          <div className="flex rounded-md border border-[var(--leo-border)] overflow-hidden text-sm" role="group" aria-label="Setting">
+            {([["year", "Peri-urban · 100 kVA · 20% AC"], ["urban", "Urban · 200 kVA · 45% AC"]] as const).map(([k, label]) => (
+              <button key={k} onClick={() => setSweep(k)} aria-pressed={sweep === k}
+                className={`px-3 py-1 ${sweep === k ? "bg-[var(--leo-accent)]/20 text-[var(--leo-text)]" : "text-[var(--leo-text-dim)]"}`}>
+                {label}
+              </button>
+            ))}
+          </div>
+        </div>
+        {data.scenario_name && <p className="text-xs text-[var(--leo-text-dim)]">{data.scenario_name}</p>}
         <p className="text-sm text-[var(--leo-text-dim)] max-w-3xl">
           {days} simulated days (one week in every month), same neighbourhood, weather, outages and household
           behaviour, with and without LEO. Figures are scaled to a year. Physical results come from the simulation;
@@ -342,7 +357,7 @@ export default function ImpactReport() {
             title="Evening peak at the transformer (average day)"
             base={num(rel.evening_peak_kw_mean_base)} leo={num(rel.evening_peak_kw_mean)} unit="kW"
             better={`${num(-pctChange(rel.evening_peak_kw_mean_base ?? 0, rel.evening_peak_kw_mean ?? 0))}% lower; worst day ${num(rel.evening_peak_kw_max_base)} → ${num(rel.evening_peak_kw_max)} kW`}
-            note="Rated 100 kVA (≈95 kW). Battery discharge is spread across the peak (water-filling), with DR offers for what the battery can't cover."
+            note={`Rated ${num(data.assumptions.neighbourhood?.transformer_kva)} kVA (≈${num(evRef)} kW). Battery discharge is spread across the peak (water-filling); pumps are moved to midday every day and ACs are cycled on event days.`}
           />
           <Kpi
             title="Verified peak reduction (DFPO)"
@@ -445,10 +460,33 @@ export default function ImpactReport() {
             </div>
             <dl className="grid grid-cols-2 gap-3 text-center">
               <div><dt className="text-xs text-[var(--leo-text-dim)]">Upfront cost</dt><dd className="text-xl font-semibold">₹0</dd></div>
-              <div><dt className="text-xs text-[var(--leo-text-dim)]">Average reward</dt><dd className="text-xl font-semibold">{rs(r.households.payout_per_household_rs)}<span className="text-xs font-normal">/yr</span></dd></div>
+              <div><dt className="text-xs text-[var(--leo-text-dim)]">Average over all homes</dt><dd className="text-xl font-semibold">{rs(r.households.payout_per_household_rs)}<span className="text-xs font-normal">/yr</span></dd></div>
               <div><dt className="text-xs text-[var(--leo-text-dim)]">Backup for critical premises</dt><dd className="text-xl font-semibold">₹{num(data.assumptions.backup?.fee_rs_per_kwh)}<span className="text-xs font-normal">/kWh</span></dd></div>
               <div><dt className="text-xs text-[var(--leo-text-dim)]">Own home inverter instead</dt><dd className="text-xl font-semibold">₹15,000+<span className="text-xs font-normal"> per kWh</span></dd></div>
             </dl>
+            {r.households.per_household && (() => {
+              const ph = r.households.per_household;
+              const pool = ph.streams_rs_per_household ?? 0;
+              return (
+                <table className="w-full text-xs">
+                  <thead className="text-[var(--leo-text-dim)]"><tr><th className="text-left font-normal">Who</th><th className="text-right font-normal">Per year</th></tr></thead>
+                  <tbody>
+                    {(ph.n_pump_homes ?? 0) > 0 && (
+                      <tr className="border-t border-[var(--leo-border)]/50"><td className="py-1">Pump home ({num(ph.n_pump_homes)}): fee + ToD saving + pool</td>
+                        <td className="text-right font-semibold">{rs(ph.pump_home_fee_rs + ph.pump_home_tod_saving_rs + pool)}</td></tr>)}
+                    {(ph.n_ac_homes ?? 0) > 0 && (
+                      <tr className="border-t border-[var(--leo-border)]/50"><td className="py-1">AC home ({num(ph.n_ac_homes)}): event payments + pool</td>
+                        <td className="text-right font-semibold">{rs(ph.ac_home_event_pay_rs + pool)}</td></tr>)}
+                    <tr className="border-t border-[var(--leo-border)]/50"><td className="py-1">Every other home: solar / rebate pool</td>
+                      <td className="text-right font-semibold">{rs(pool + (ph.sms_dr_rs_per_household ?? 0))}</td></tr>
+                  </tbody>
+                </table>
+              );
+            })()}
+            <p className="text-[10px] text-[var(--leo-text-dim)]">
+              ToD saving applies if KERC extends ToD to LT domestic (the amended Rights of Consumers Rules allow up to 20%).
+              Tata Power-DDL&apos;s pilot paid ₹250/event (₹50/100 tiers too), 12–16 events a year.
+            </p>
             <div className="text-xs">
               <p className="text-[var(--leo-text-dim)] mb-1">Demand response paid to households: {rs(r.physical.dr_paid_rs)}/yr</p>
               <table className="w-full">

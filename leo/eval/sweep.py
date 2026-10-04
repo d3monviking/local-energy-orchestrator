@@ -242,9 +242,9 @@ def pretrain_bandit(hh: pd.DataFrame, rng: np.random.Generator) -> tuple[LinUCB,
     return bandit, acc
 
 
-def build_world(months: list[int] | None) -> None:
+def build_world(months: list[int] | None, scenario_path: str | None = None) -> None:
     t0 = time.perf_counter()
-    scenario = load_scenario()
+    scenario = load_scenario(Path(scenario_path)) if scenario_path else load_scenario()
     feeder = build_feeder(scenario)
     weather = to_15min(fetch_scenario_weather(scenario))
     rng = np.random.default_rng(scenario["sim"]["seed"])
@@ -269,7 +269,8 @@ def build_world(months: list[int] | None) -> None:
     # Forecasts: 4 folds by quarter of the sample; each fold's model never
     # sees its own evaluated weeks (+-1 day).
     forecasts: dict[date_cls, dict] = {}
-    cache = Path("eval/results/forecast_cache.pkl")
+    tag = Path(scenario_path).stem if scenario_path else "scenario"
+    cache = Path("eval/results/forecast_cache.pkl" if tag == "scenario" else f"eval/results/forecast_cache_{tag}.pkl")
     cached = pickle.loads(cache.read_bytes()) if cache.exists() else {}
     folds: dict[int, list] = {}
     for week in weeks:
@@ -300,6 +301,12 @@ def build_world(months: list[int] | None) -> None:
 
     bandit, engagement = pretrain_bandit(hh, np.random.default_rng(scenario["sim"]["seed"] + 2))
 
+    # DR event days: the top 5% of sampled days by forecast evening peak
+    # (~20/yr; Tata Power-DDL called 12-16/yr, research), relative so it
+    # works on any transformer.
+    evpk = [max(sum(forecasts[d][p]["p50"][i] for p in PHASES) for i in range(43, 72)) for d in forecasts]
+    dr_event_min_peak_kw = float(np.percentile(evpk, 95))
+
     # Automated-DR enrolment: its own rng so the world is unchanged.
     sd = scenario.get("smart_dr", {})
     erng = np.random.default_rng(scenario["sim"]["seed"] + 3)
@@ -313,7 +320,8 @@ def build_world(months: list[int] | None) -> None:
         true_load=true_load[hh["id"]], net_load=net_load[hh["bus_id"]], true_pv=true_pv,
         weeks=weeks, outages=outages, shedding=load_shedding_days(scenario, weeks),
         forecasts=forecasts, bandit=bandit, engagement=engagement,
-        backup=backup_registry(feeder, scenario),
+        backup=backup_registry(feeder, scenario), dr_event_min_peak_kw=dr_event_min_peak_kw,
+        scenario_path=scenario_path,
     ))
     print(f"world built in {time.perf_counter()-t0:.0f}s: {len(weeks)} week(s), "
           f"{len(W['shedding'])} load-shedding day(s), {len(W['backup'])} backup premises", flush=True)
@@ -459,7 +467,7 @@ def run_task(task: tuple[str, int]) -> list[dict]:
             starts = [i for i in range(96 - DR_WINDOW_INTERVALS - REBOUND_INTERVALS)
                       if DR_SEARCH_IST[0] <= local_h[i] - 0.25 < DR_SEARCH_IST[1]]
             fc_peak = float(max(sum(fc[p]["p50"][i] for p in PHASES) for i in range(96) if 16.5 <= local_h[i] < 23.5))
-            if starts and excess.max() > 0 and fc_peak >= DR_EVENT_MIN_PEAK_KW:
+            if starts and excess.max() > 0 and fc_peak >= W["dr_event_min_peak_kw"]:
                 w0 = max(starts, key=lambda i: excess[i:i + DR_WINDOW_INTERVALS].sum())
                 win = slice(w0, w0 + DR_WINDOW_INTERVALS)
                 m_dr["events"] = 1
@@ -716,9 +724,10 @@ def main() -> None:
     ap.add_argument("--configs", nargs="*", default=list(CONFIGS))
     ap.add_argument("--workers", type=int, default=8)
     ap.add_argument("--append", action="store_true", help="add/replace these configs in an existing sweep")
+    ap.add_argument("--scenario", default=None, help="scenario YAML (default scenario.yaml), e.g. scenario_urban.yaml")
     args = ap.parse_args()
 
-    build_world(args.months)
+    build_world(args.months, args.scenario)
     tasks = [(c, w) for w in range(len(W["weeks"])) for c in args.configs]
     t0 = time.perf_counter()
     rows: list[dict] = []
@@ -737,7 +746,11 @@ def main() -> None:
     params = {"configs": configs, "weeks": [[str(d) for d in w] for w in W["weeks"]],
               "rebound_fraction": REBOUND_FRACTION, "backup_premises": W["backup"].to_dict("records"),
               "load_shedding": {str(k): [str(x) for x in v] for k, v in W["shedding"].items()},
-              "scale_to_year": 365.0 / (7 * len(W["weeks"]))}
+              "scale_to_year": 365.0 / (7 * len(W["weeks"])),
+              "scenario_path": args.scenario, "scenario_name": W["scenario"]["neighbourhood"]["name"],
+              "transformer_kva": W["scenario"]["neighbourhood"]["transformer_kva"],
+              "appliance_shares": W["scenario"]["households"]["shares"],
+              "dr_event_min_peak_kw": W["dr_event_min_peak_kw"]}
     os.makedirs("eval/results", exist_ok=True)
     with open(f"eval/results/{args.sweep_id}.json", "w") as fh:
         json.dump({"params": params, "rows": rows}, fh, default=str)

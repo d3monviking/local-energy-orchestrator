@@ -1,0 +1,31 @@
+%% Peak day (27 Apr): day-ahead plan, approval, offers, then the day itself.
+sequenceDiagram
+    autonumber
+    participant C10 as Connectors (C10)
+    participant C5 as Forecast (C5)
+    participant C6 as Network model (C6)
+    participant C7 as Battery orchestrator (C7)
+    participant C8 as DR engine (C8)
+    participant OP as Operator (console)
+    participant HH as Households / devices
+    participant BAT as Battery blocks (C2)
+    participant C12 as Settlement (C12)
+    C10->>C5: D-1 19:30 weather forecast, day-late meter history
+    C5->>C6: P10/P50/P90 net load per phase, 96 intervals
+    C6->>C7: forecast violations + safe charge/discharge limits
+    C7->>C7: peak-shave plan: fill midday trough, flatten evening peak
+    C6->>C8: residual kW above rating after battery, event window
+    C8->>C8: stress day? pick 2-h window, LinUCB chooses offer per home
+    C7->>OP: draft plan + DR plan (with reasons)
+    OP->>C7: approve (D-1 23:30)
+    C8->>HH: SMS offers (₹0/25/50/100) · pump schedules · AC event notice
+    Note over HH,BAT: Day D
+    HH->>HH: enrolled pumps run at ~10:45 on solar surplus
+    BAT->>BAT: charge midday (rooftop export first)
+    loop every 15 min, 16:30–23:30
+        C7->>BAT: re-solve shave level from busbar CT + forecast, setpoint
+    end
+    HH->>HH: AC event: controllers cycle ACs to 40% for 2 h
+    Note over C12: D+1 morning, meter data arrives
+    C12->>C12: IPMVP baselines, verify kWh, holdout check
+    C12->>HH: DR payments first, then pooled rewards (≤ 20% of revenue)

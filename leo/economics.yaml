@@ -15,7 +15,7 @@ neighbourhood:
 
 operator:
   # Share of realised revenue paid out to households (Architecture §12.2).
-  alpha: 0.15                         # design choice: a deal exists only up to ~20% (eval/economics.py max_alpha_for_deal); DR incentives are paid first regardless
+  alpha: 0.20                         # design choice: a deal exists up to ~29% for the recommended design (eval/economics.py max_alpha_for_deal); DR incentives are paid first regardless
 
 operating_model:
   # One local operator (cooperative / NGO, registered DF aggregator) runs a
@@ -58,6 +58,12 @@ tariffs:
   peak_hours_ist: [18, 23]            # research: IEX evening peak 18:00-23:00
   solar_hours_ist: [10, 16]           # research: midday surplus window 10:00-14:00 (charging runs to 16:00)
   feed_in_tariff_rs_per_kwh: 2.93     # web: KERC proposed tariff for PM Surya Ghar rooftop >3 kW
+  # Household side, if ToD reaches LT domestic (research: amended Rights of
+  # Consumers Rules let domestic consumers save up to 20% by shifting to
+  # solar hours; KERC today enforces ToD only for HT > 500 kVA).
+  domestic_rs_per_kwh: 7.0            # verify: BESCOM LT domestic average energy charge
+  domestic_tod_solar_saving_pct: 20   # research
+  domestic_tod_peak_surcharge_pct: 10 # web: Rules 2023 - peak >= 1.10x for domestic
 
 dfpo:
   # DFPO is measured in kW at a single instance in the peak period (research [12-14]).
@@ -97,10 +103,17 @@ discom:
 smart_dr:
   # Enrolment shares, AC curtailment and the per-event payment are in
   # scenario.yaml (they drive the simulation); costs are here.
-  pump_relay_rs: 2500                 # verify: smart relay/contactor + install for a 0.75 kW pump
-  ac_controller_rs: 3500              # verify: smart AC controller (IR blaster / smart plug with power metering)
+  pump_relay_rs: 2090                 # research: smart AC remote + 16A smart plug bundle ~Rs 2,090 (a 0.75 kW pump draws ~3.3 A)
+  ac_controller_rs: 999               # research: Wi-Fi IR blaster Rs 799-999, controls a non-smart AC
   pump_fee_rs_per_month: 100          # verify: paid to each enrolled pump household for letting LEO schedule it
   device_life_years: 5                # verify
+  # Cross-checks from Indian pilots (research), not inputs:
+  #  Tata Power-DDL behavioural DR: 2,041 homes, 56% participation per event
+  #  (peak 75%), 21% reduction vs baseline; Rs 250/event for >10% cut plus
+  #  Rs 200 sign-up, other tiers Rs 50/100; 16 / 12 / 16 events in FY22-24,
+  #  <= 2 h, 3-4 a month April-September.
+  #  BYPL + AEEE automated DR: 48 homes, 0.03-0.16 kW per connected home,
+  #  Rs 1 per kWh saved.
 
 backup:
   fee_rs_per_kwh: 12.0                # verify: member-agreed; vs diesel ~Rs 25-30/kWh

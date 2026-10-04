@@ -1,0 +1,20 @@
+%% Unplanned upstream fault: no warning, so LEO reacts.
+sequenceDiagram
+    autonumber
+    participant SEN as Sensors (C1)
+    participant C9 as Outage + backup (C9)
+    participant BAT as Battery blocks
+    participant CP as Critical premises (6)
+    participant C13 as Recommendations (C13)
+    participant D as DISCOM
+    SEN->>C9: 19:40 power-fail on all busbar + far-end sensors
+    C9->>C9: classify scope: all phases dark → upstream fault
+    BAT->>BAT: inverters anti-island, grid relay opens
+    C9->>C9: mode Normal → Backup (owner C9)
+    C9->>C9: available kW = SoC at loss down to 5% floor ÷ outage length
+    C9->>CP: allocate by priority, set current limits
+    BAT->>CP: supply over the backup circuit only
+    C9->>C13: outage scope, time, premises on backup
+    C13->>D: structured recommendation: upstream fault on DT-0417, all 3 phases
+    D->>SEN: crews restore supply
+    C9->>CP: staggered re-transfer, then mode → Normal
