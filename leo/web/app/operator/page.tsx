@@ -14,21 +14,25 @@ import Timeline, { TimelineEventKind, TimelineEventMarker } from "@/components/t
 import ForecastPanel from "@/components/operator/ForecastPanel";
 import ActionLog from "@/components/operator/ActionLog";
 import Glossary from "@/components/operator/Glossary";
+import PhaseChip from "@/components/operator/PhaseChip";
 import { ActionItem, EVENT_STYLE, Forecast, PredictedEvent, RunMeta, fmtTime, ms } from "@/components/operator/types";
 
 const DT_ID = process.env.NEXT_PUBLIC_DT_ID ?? "DT-0417";
 const CLOUD_API_URL = process.env.NEXT_PUBLIC_CLOUD_API_URL ?? "http://localhost:8030";
 const PHASES = ["R", "Y", "B"] as const;
-const PHASE_TEXT_COLOR: Record<string, string> = { R: "#e0473e", Y: "#e0a72e", B: "#3ba9ff" };
-
-const RUN_GROUPS: { title: string; runs: string[] }[] = [
-  { title: "Peak day · 27 Apr", runs: ["normal", "baseline"] },
-  { title: "Outages · 27 Apr", runs: ["load_shedding", "outage"] },
-  { title: "Sunny day · 11 Feb", runs: ["surplus", "surplus_baseline"] },
+/** Recorded scenarios. Two have a "without LEO" recording of the same day for comparison. */
+const SCENARIOS: { id: string; label: string; withLeo: string; withoutLeo?: string }[] = [
+  { id: "peak", label: "Peak day, 27 Apr", withLeo: "normal", withoutLeo: "baseline" },
+  { id: "shed", label: "Announced load shedding, 27 Apr", withLeo: "load_shedding" },
+  { id: "outage", label: "Unplanned outage, 27 Apr", withLeo: "outage" },
+  { id: "sunny", label: "Sunny surplus day, 11 Feb", withLeo: "surplus", withoutLeo: "surplus_baseline" },
 ];
-const SHORT_LABEL: Record<string, string> = {
-  normal: "With LEO", baseline: "Without LEO", load_shedding: "Load shedding", outage: "Unplanned",
-  surplus: "With LEO", surplus_baseline: "Without LEO",
+const MODE_LABEL: Record<string, string> = {
+  normal: "Normal", pre_outage: "Pre-outage", backup: "Backup", restoration: "Restoration",
+};
+const RULE_TEXT: Record<string, string> = {
+  peak_shave: "live peak shaving", absorb_surplus: "soaking up solar surplus",
+  valley_fill: "filling the overnight dip", overvoltage: "holding voltage down",
 };
 
 type DispatchRow = { block_id: string; ts_end: string; setpoint_kw: number; actual_kw: number; soc_after: number; mode: string; rule_triggered: string | null };
@@ -49,12 +53,18 @@ function latestByKey<T extends { ts_end: string }>(rows: T[], keyOf: (r: T) => s
 const getJSON = <T,>(path: string, fallback: T): Promise<T> =>
   fetch(`${CLOUD_API_URL}${path}`).then((r) => (r.ok ? r.json() : fallback)).catch(() => fallback);
 
-type Banner = { tone: "bad" | "warn" | "info" | "ok"; title: string; body: string };
+type Banner = { tone: "bad" | "warn" | "info" | "ok"; title: string; body: string[] };
 
 export default function OperatorHome() {
   const [catalog, setCatalog] = useState<RunMeta[]>([]);
   const [catalogError, setCatalogError] = useState(false);
-  const [runId, setRunId] = useState("normal");
+  const [scenarioId, setScenarioId] = useState("peak");
+  const [withLeo, setWithLeo] = useState(true);
+  const scenario = SCENARIOS.find((s) => s.id === scenarioId)!;
+  const runId = withLeo || !scenario.withoutLeo ? scenario.withLeo : scenario.withoutLeo;
+  const compareRunId = scenario.withoutLeo && runId === scenario.withLeo ? scenario.withoutLeo : null;
+  const [compareForecast, setCompareForecast] = useState<Forecast | null>(null);
+  const [showMore, setShowMore] = useState(false);
   const [currentTs, setCurrentTs] = useState<string | null>(null);
   const [playing, setPlaying] = useState(false);
   const [seek, setSeek] = useState<{ ts: string; nonce: number } | null>(null);
@@ -93,6 +103,12 @@ export default function OperatorHome() {
       .then((rows) => setBackupBusIds(new Set(rows.map((r) => r.bus_id))));
   }, [run?.run_id]);
 
+  // The same day recorded without LEO, for a "without LEO at this moment" comparison.
+  useEffect(() => {
+    setCompareForecast(null);
+    if (compareRunId) getJSON<Forecast | null>(`/api/forecast/${compareRunId}`, null).then(setCompareForecast);
+  }, [compareRunId]);
+
   // An unplanned outage can't be on the forecast — add it as a card once it exists in the log.
   const events: PredictedEvent[] = useMemo(() => {
     const loss = actions.find((a) => a.kind === "grid_loss" && a.meta?.planned === false);
@@ -112,11 +128,16 @@ export default function OperatorHome() {
     () => latestByKey(sensors.filter((s) => s.sensor_id.includes("FAREND")), (r) => r.sensor_id.replace("SEN-FAREND-", ""), currentTs),
     [sensors, currentTs]
   );
-  const liveTrafo = useMemo(() => {
-    if (!forecast || !currentTs) return null;
-    const past = forecast.intervals.filter((i) => ms(i.ts_end) <= ms(currentTs) && i.trafo_actual_pct != null);
-    return past.length ? past[past.length - 1].trafo_actual_pct : null;
-  }, [forecast, currentTs]);
+  // Transformer loading at the playhead only: never carried forward across a gap (an outage).
+  const trafoAt = (f: Forecast | null) => {
+    if (!f || !currentTs) return null;
+    const t = ms(currentTs);
+    let best: number | null = null;
+    for (const i of f.intervals) if (ms(i.ts_end) <= t && t - ms(i.ts_end) < 15 * 60_000) best = i.trafo_actual_pct;
+    return best;
+  };
+  const liveTrafo = useMemo(() => trafoAt(forecast), [forecast, currentTs]); // eslint-disable-line react-hooks/exhaustive-deps
+  const withoutLeoTrafo = useMemo(() => trafoAt(compareForecast), [compareForecast, currentTs]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const now = currentTs ? ms(currentTs) : 0;
   const activeItems = actions.filter((a) => a.end && ms(a.ts) <= now && now < ms(a.end));
@@ -125,93 +146,150 @@ export default function OperatorHome() {
     return modes.length ? String(modes[modes.length - 1].meta.to) : "normal";
   }, [actions, now]);
 
+  // One situation line, most severe first. Every number is the value at the playhead, never a future peak.
   const banners: Banner[] = useMemo(() => {
     const out: Banner[] = [];
-    const leoNow = activeItems.filter((a) => a.kind.startsWith("battery_") || a.kind === "dr_window")
-      .map((a) => a.kind === "dr_window" ? "DR window live" : a.title.replace(/ \d\d:\d\d–\d\d:\d\d IST.*$/, ""));
-    const leoText = run?.leo_enabled ? (leoNow.length ? `LEO is: ${leoNow.join(" · ")}.` : "LEO: no battery/DR action this interval.") : "LEO is off on this run.";
-    if (currentMode === "backup" || currentMode === "restoration") {
-      const b = actions.find((a) => a.kind === "backup_start");
-      out.push({ tone: "bad", title: currentMode === "backup" ? "GRID DOWN — running on backup" : "GRID BACK — staggered re-transfer",
-        body: `${b?.title ?? ""}. ${b?.detail ?? ""}` });
+    const floorV = limits.nominal * (1 - limits.pct / 100), ceilV = limits.nominal * (1 + limits.pct / 100);
+
+    const leoLine = (() => {
+      if (!run?.leo_enabled) return "LEO is switched off in this recording, for comparison.";
+      const parts: string[] = [];
+      const dis = PHASES.filter((p) => (liveDispatch[p]?.actual_kw ?? 0) > 0.05 && liveDispatch[p]?.mode !== "backup");
+      const chg = PHASES.filter((p) => (liveDispatch[p]?.actual_kw ?? 0) < -0.05);
+      if (dis.length) parts.push(`batteries discharging on ${dis.join(", ")}`);
+      if (chg.length) parts.push(`charging on ${chg.join(", ")}`);
+      const drw = activeItems.find((x) => x.kind === "dr_window");
+      if (drw) parts.push(`DR window open on phase ${drw.meta.phase}`);
+      if (activeItems.some((x) => x.kind === "dr_auto_ac")) parts.push("enrolled ACs cycled down");
+      return parts.length ? `LEO now: ${parts.join("; ")}.` : "LEO: no battery or DR action this interval.";
+    })();
+
+    if (currentMode === "backup") {
+      const loss = [...actions].reverse().find((a) => a.kind === "grid_loss" && ms(a.ts) <= now);
+      const socs = PHASES.map((p) => liveDispatch[p]).filter((d) => d?.mode === "backup").map((d) => d!.soc_after * 100);
+      out.push({ tone: "bad", title: `Grid down. ${backupBusIds.size} critical premises on backup power`,
+        body: [`${loss?.meta?.planned ? "Scheduled load shedding" : "Unplanned fault"} since ${loss ? fmtTime(loss.ts) : "—"} IST. The rest of the feeder has no supply.`,
+          socs.length ? `Backup batteries ${socs.map((v) => `${v.toFixed(0)}%`).join(" / ")} charged.` : ""].filter(Boolean) });
+    } else if (currentMode === "restoration") {
+      out.push({ tone: "warn", title: "Grid back. Reconnecting backup premises in small batches",
+        body: ["Staggered so the returning load does not trip the transformer."] });
     } else if (currentMode === "pre_outage") {
       const notice = actions.find((a) => a.kind === "load_shedding_notice");
-      out.push({ tone: "warn", title: "PRE-OUTAGE — load shedding scheduled",
-        body: `${notice?.title ?? ""}. Batteries hold and charge instead of discharging; all households were alerted by SMS.` });
+      out.push({ tone: "warn", title: notice?.title.replace("DISCOM published a load-shedding schedule", "Load shedding announced") ?? "Load shedding announced",
+        body: ["Batteries hold their charge for the cut instead of discharging. All households were told by SMS."] });
     }
-    for (const a of activeItems.filter((x) => x.actor === "Network")) {
-      const ev = String(a.meta.type);
-      out.push({ tone: "bad", title: `${(EVENT_STYLE[ev]?.label ?? ev).toUpperCase()}${a.meta.phase ? ` — phase ${a.meta.phase}` : ""}`,
-        body: `${a.title}. ${ev === "transformer_overload" ? "" : `${violatingCount} bus points out of limits right now. `}${leoText}` });
+
+    const net = activeItems.filter((x) => x.actor === "Network");
+    if (net.length && currentMode !== "backup") {
+      const parts: string[] = [];
+      if (net.some((x) => x.meta.type === "transformer_overload") && liveTrafo != null && liveTrafo > 100)
+        parts.push(`Transformer at ${liveTrafo.toFixed(0)}% of rating`);
+      const lowPh = PHASES.filter((p) => { const v = liveVoltage[p]?.voltage_v; return v != null && v < floorV; });
+      const highPh = PHASES.filter((p) => { const v = liveVoltage[p]?.voltage_v; return v != null && v > ceilV; });
+      if (lowPh.length) parts.push(`low voltage on phase ${lowPh.join(", ")}`);
+      if (highPh.length) parts.push(`high voltage on phase ${highPh.join(", ")}`);
+      if (!parts.length) parts.push(`${violatingCount} points outside voltage limits`);
+      const vs = [...lowPh, ...highPh].map((p) => `${p} ${liveVoltage[p]!.voltage_v!.toFixed(0)} V`);
+      const body = [
+        `${vs.length ? `Far-end voltage ${vs.join(", ")} (limits ${floorV.toFixed(0)}–${ceilV.toFixed(0)} V). ` : ""}${violatingCount} of the feeder's points are outside limits.`,
+        leoLine,
+      ];
+      if (withoutLeoTrafo != null && liveTrafo != null) body.push(`Without LEO at this moment the transformer was at ${withoutLeoTrafo.toFixed(0)}% of rating.`);
+      const t = parts.join(", ");
+      out.push({ tone: "bad", title: t.charAt(0).toUpperCase() + t.slice(1), body });
     }
+
     if (!out.length) {
       const next = events.find((e) => ms(e.start) > now);
+      const body = [leoLine];
+      if (withoutLeoTrafo != null && liveTrafo != null && withoutLeoTrafo > 100)
+        body.push(`Without LEO at this moment the transformer was at ${withoutLeoTrafo.toFixed(0)}% of rating.`);
       if (next) {
         const mins = Math.round((ms(next.start) - now) / 60000);
-        out.push({ tone: "info", title: `Next predicted: ${next.title}`,
-          body: `Expected from ${fmtTime(next.start)} IST (in ${Math.floor(mins / 60)}h ${mins % 60}m). ${leoText}` });
+        out.push({ tone: "info", title: `Within limits. Next forecast problem in ${Math.floor(mins / 60)} h ${mins % 60} min`,
+          body: [`${next.title}, expected from ${fmtTime(next.start)} IST.`, ...body] });
       } else {
-        out.push({ tone: "ok", title: "All within limits", body: leoText });
+        out.push({ tone: "ok", title: "Within limits", body });
       }
     }
     return out;
-  }, [activeItems, currentMode, actions, events, now, violatingCount, run?.leo_enabled]);
+  }, [activeItems, currentMode, actions, events, now, violatingCount, run?.leo_enabled, liveDispatch, liveVoltage, liveTrafo, withoutLeoTrafo, backupBusIds, limits]);
 
   const markers: TimelineEventMarker[] = actions
     .filter((a) => ["grid_loss", "grid_return", "load_shedding_notice", "dr_window", "recommendation"].includes(a.kind))
     .map((a) => ({
       ts: a.ts, label: a.title,
-      kind: (a.kind === "grid_loss" ? "outage" : a.kind === "grid_return" ? "restoration" : a.kind === "dr_window" ? "dr_event" : "violation") as TimelineEventKind,
+      kind: (a.kind === "grid_loss" ? "outage" : a.kind === "grid_return" ? "restoration" : a.kind === "dr_window" ? "dr_event" : a.kind === "recommendation" ? "escalation" : "violation") as TimelineEventKind,
     }));
-  const bands = events.map((e) => ({ startTs: e.start, endTs: e.end, color: EVENT_STYLE[e.type]?.color ?? "#93a1b0", label: `Predicted: ${e.title}` }));
+  const bands = events.filter((e) => e.predicted_at).map((e) => ({ startTs: e.start, endTs: e.end, color: EVENT_STYLE[e.type]?.color ?? "#93a1b0", label: `Predicted: ${e.title}` }));
   const doSeek = (ts: string) => setSeek({ ts, nonce: Date.now() });
   const floor = limits.nominal * (1 - limits.pct / 100), ceil = limits.nominal * (1 + limits.pct / 100);
 
   const TONE: Record<Banner["tone"], string> = {
-    bad: "border-[var(--leo-bad)] bg-[var(--leo-bad)]/15", warn: "border-[var(--leo-warn)] bg-[var(--leo-warn)]/15",
-    info: "border-[var(--leo-accent)] bg-[var(--leo-accent)]/10", ok: "border-[var(--leo-ok)] bg-[var(--leo-ok)]/10",
+    bad: "border-[var(--leo-bad-fill)] bg-[rgb(224_71_62/0.12)]", warn: "border-[var(--leo-warn)] bg-[rgb(224_167_46/0.10)]",
+    info: "border-[var(--leo-border)] bg-[var(--leo-panel)]", ok: "border-[var(--leo-border)] bg-[var(--leo-panel)]",
   };
-  const TONE_TEXT: Record<Banner["tone"], string> = { bad: "text-[var(--leo-bad)]", warn: "text-[var(--leo-warn)]", info: "text-[var(--leo-accent)]", ok: "text-[var(--leo-ok)]" };
+  const TONE_ICON: Record<Banner["tone"], string> = { bad: "!", warn: "!", info: "i", ok: "✓" };
+  const TONE_TEXT: Record<Banner["tone"], string> = { bad: "text-[var(--leo-bad)]", warn: "text-[var(--leo-warn)]", info: "text-[var(--leo-text)]", ok: "text-[var(--leo-ok)]" };
 
   return (
-    <main id="main-content" className="px-4 py-3 flex flex-col gap-3 h-[calc(100vh-57px)] min-h-[720px]">
-      <div className="flex flex-wrap items-center gap-3">
-        <h1 className="text-base font-semibold mr-2">Operator console</h1>
-        {RUN_GROUPS.map((g) => {
-          const avail = g.runs.filter((r) => catalog.some((c) => c.run_id === r));
-          if (!avail.length) return null;
-          return (
-            <div key={g.title} className="flex items-center gap-1.5">
-              <span className="text-[11px] text-[var(--leo-text-dim)]">{g.title}</span>
-              <div className="flex rounded-md border border-[var(--leo-border)] overflow-hidden">
-                {avail.map((r) => (
-                  <button key={r} onClick={() => setRunId(r)}
-                    className={`px-2.5 py-1 text-xs ${runId === r ? "bg-[var(--leo-accent)] text-black" : "bg-[var(--leo-panel-raised)]"}`}>
-                    {SHORT_LABEL[r]}
-                  </button>
-                ))}
-              </div>
-            </div>
-          );
-        })}
-        <button onClick={() => setShowGlossary(true)}
-          className="ml-auto text-xs rounded-md border border-[var(--leo-border)] px-2.5 py-1 hover:border-[var(--leo-accent)]">
+    <main id="main-content" className="px-4 py-3 flex flex-col gap-3 h-[calc(100dvh-50px)] min-h-[680px]">
+      <div className="flex flex-wrap items-center gap-x-4 gap-y-2">
+        <h1 className="sr-only">Operator console: map and replay</h1>
+        <label className="flex items-center gap-2 text-sm">
+          <span className="text-[var(--leo-text-dim)]">Recording</span>
+          <select value={scenarioId} onChange={(e) => { setScenarioId(e.target.value); setShowMore(false); }}
+            className="rounded-md border border-[var(--leo-border)] bg-[var(--leo-panel-raised)] px-2.5 py-1.5 text-sm">
+            {SCENARIOS.filter((sc) => catalog.length === 0 || catalog.some((c) => c.run_id === sc.withLeo)).map((sc) => (
+              <option key={sc.id} value={sc.id}>{sc.label}</option>
+            ))}
+          </select>
+        </label>
+        {scenario.withoutLeo && (
+          <div role="group" aria-label="Compare" className="flex rounded-md border border-[var(--leo-border)] p-0.5">
+            {[true, false].map((w) => (
+              <button key={String(w)} type="button" aria-pressed={withLeo === w} onClick={() => setWithLeo(w)}
+                className={`rounded px-3 py-1 text-sm ${withLeo === w ? "bg-[var(--leo-panel-raised)] text-[var(--leo-text)] shadow-[inset_0_0_0_1px_var(--leo-border)]" : "text-[var(--leo-text-dim)] hover:text-[var(--leo-text)]"}`}>
+                {w ? "With LEO" : "Without LEO"}
+              </button>
+            ))}
+          </div>
+        )}
+        <span className="text-sm text-[var(--leo-text-dim)]">
+          LEO mode <span className="font-medium text-[var(--leo-text)]">{run?.leo_enabled ? MODE_LABEL[currentMode] ?? currentMode : "Off"}</span>
+        </span>
+        <button type="button" onClick={() => setShowGlossary(true)}
+          className="ml-auto rounded-md border border-[var(--leo-border)] px-3 py-1.5 text-sm hover:bg-[var(--leo-panel-raised)]">
           What am I looking at?
         </button>
       </div>
 
       {catalogError && (
-        <div role="alert" className="text-sm text-[var(--leo-bad)]">Couldn&apos;t reach the cloud API — is the stack running?</div>
+        <div role="alert" className="text-sm"><span className="font-medium text-[var(--leo-bad)]">The recordings could not be loaded.</span> <span className="text-[var(--leo-text-dim)]">Check that the cloud API is running on {CLOUD_API_URL}, then reload.</span></div>
       )}
 
-      <div className="flex flex-col gap-1.5" role="status" aria-live="polite">
-        {banners.map((b, i) => (
-          <div key={i} className={`rounded-md border px-3 py-2 text-sm flex gap-3 items-baseline ${TONE[b.tone]}`}>
-            <span className={`font-semibold whitespace-nowrap ${TONE_TEXT[b.tone]}`}>{b.title}</span>
-            <span className="text-[var(--leo-text)]">{b.body}</span>
+      {banners[0] && (
+        <section aria-label="Situation now" className={`rounded-md border px-3 py-2 text-sm ${TONE[banners[0].tone]}`}>
+          <p role="status" className="sr-only">{banners[0].title}</p>
+          <div className="flex flex-wrap items-baseline gap-x-3 gap-y-0.5">
+            <span aria-hidden className={`inline-flex h-4 w-4 shrink-0 items-center justify-center self-center rounded-full border text-[11px] font-bold ${TONE_TEXT[banners[0].tone]} border-current`}>{TONE_ICON[banners[0].tone]}</span>
+            <span className={`font-semibold ${TONE_TEXT[banners[0].tone]}`}>{banners[0].title}</span>
+            <span className="text-[var(--leo-text)]">{banners[0].body.join(" ")}</span>
+            {banners.length > 1 && (
+              <button type="button" aria-expanded={showMore} onClick={() => setShowMore((v) => !v)}
+                className="ml-auto text-[13px] text-[var(--leo-text-dim)] underline underline-offset-2 hover:text-[var(--leo-text)]">
+                {showMore ? "Show less" : `${banners.length - 1} more`}
+              </button>
+            )}
           </div>
-        ))}
-      </div>
+          {showMore && banners.slice(1).map((b, i) => (
+            <div key={i} className="mt-1.5 flex flex-wrap items-baseline gap-x-3 border-t border-[var(--leo-border)] pt-1.5 pl-7">
+              <span className={`font-semibold ${TONE_TEXT[b.tone]}`}>{b.title}</span>
+              <span>{b.body.join(" ")}</span>
+            </div>
+          ))}
+        </section>
+      )}
 
       {run && (
         <div className="flex-1 min-h-0 grid grid-cols-1 lg:grid-cols-[300px_minmax(0,1fr)_360px] gap-3">
@@ -219,48 +297,52 @@ export default function OperatorHome() {
             currentTs={currentTs} leoEnabled={run.leo_enabled} onSeek={doSeek} />
 
           <div className="flex flex-col gap-2 min-h-[360px]">
-            <div className="flex items-center gap-2 text-xs">
+            <div className="flex items-center gap-2 text-[13px]">
               <span className="text-[var(--leo-text-dim)]">Map shows</span>
-              <div className="flex rounded-md border border-[var(--leo-border)] overflow-hidden">
+              <div role="group" aria-label="Map shows" className="flex rounded-md border border-[var(--leo-border)] p-0.5">
                 {[false, true].map((f) => (
-                  <button key={String(f)} onClick={() => setMapForecast(f)}
-                    className={`px-2 py-0.5 ${mapForecast === f ? "bg-[var(--leo-accent)] text-black" : "bg-[var(--leo-panel-raised)]"}`}>
-                    {f ? "Forecast (predicted the day before)" : "What actually happened"}
+                  <button key={String(f)} type="button" aria-pressed={mapForecast === f} onClick={() => setMapForecast(f)}
+                    className={`rounded px-2.5 py-0.5 ${mapForecast === f ? "bg-[var(--leo-panel-raised)] text-[var(--leo-text)] shadow-[inset_0_0_0_1px_var(--leo-border)]" : "text-[var(--leo-text-dim)] hover:text-[var(--leo-text)]"}`}>
+                    {f ? "Forecast from the day before" : "What happened"}
                   </button>
                 ))}
               </div>
-              <span className="ml-auto text-[var(--leo-text-dim)]">Mode: <span className="text-[var(--leo-text)] font-medium">{currentMode.replace("_", "-")}</span></span>
             </div>
             <div className="flex-1 min-h-0">
               <FeederMap dtId={DT_ID} runId={run.run_id} ts={currentTs ?? undefined} backupBusIds={backupBusIds}
                 liveDispatchByPhase={liveDispatch} onViolatingCount={setViolatingCount} forecast={mapForecast} />
             </div>
-            <div className="grid grid-cols-2 xl:grid-cols-4 gap-2 text-xs">
+            <div className="grid grid-cols-2 gap-2 text-[13px] xl:grid-cols-4">
               {PHASES.map((p) => {
                 const v = liveVoltage[p];
                 const d = liveDispatch[p];
                 const bad = v?.voltage_v != null && (v.voltage_v < floor || v.voltage_v > ceil);
-                const act = !d ? "—" : d.mode === "backup" ? "backup port" : d.actual_kw > 0.05 ? `discharging ${d.actual_kw.toFixed(1)} kW`
+                const act = !d ? "no data yet" : d.mode === "backup" ? "feeding the backup circuit" : d.actual_kw > 0.05 ? `discharging ${d.actual_kw.toFixed(1)} kW`
                   : d.actual_kw < -0.05 ? `charging ${(-d.actual_kw).toFixed(1)} kW` : "idle";
                 return (
                   <div key={p} className="rounded-md border border-[var(--leo-border)] bg-[var(--leo-panel)] px-2.5 py-1.5">
-                    <div className="flex items-center gap-2">
-                      <span className="font-semibold" style={{ color: PHASE_TEXT_COLOR[p] }}>Phase {p}</span>
-                      <span className={bad ? "text-[var(--leo-bad)] font-medium" : ""}>
-                        {v ? (v.supply_present && v.voltage_v != null ? `${v.voltage_v.toFixed(0)} V far end` : "no supply") : "—"}
+                    <div className="flex items-baseline justify-between gap-2">
+                      <PhaseChip phase={p} />
+                      <span className={`whitespace-nowrap ${bad ? "font-semibold text-[var(--leo-bad)]" : ""}`}>
+                        {v ? (v.supply_present && v.voltage_v != null ? `${v.voltage_v.toFixed(0)} V${bad ? (v.voltage_v < floor ? " low" : " high") : ""}` : "off") : "—"}
                       </span>
                     </div>
                     <div className="text-[var(--leo-text-dim)]">
-                      Battery {act}{d && d.mode !== "backup" ? ` · ${(d.soc_after * 100).toFixed(0)}%` : ""}
-                      {d?.rule_triggered && <span className="text-[var(--leo-warn)]"> · {d.rule_triggered.replace(/_/g, " ")}</span>}
+                      Battery {act}{d && d.mode !== "backup" ? `, ${(d.soc_after * 100).toFixed(0)}%` : ""}
+                      {d?.rule_triggered && <span className="text-[var(--leo-text)]"> · {RULE_TEXT[d.rule_triggered] ?? d.rule_triggered.replace(/_/g, " ")}</span>}
                     </div>
                   </div>
                 );
               })}
               <div className="rounded-md border border-[var(--leo-border)] bg-[var(--leo-panel)] px-2.5 py-1.5">
-                <div className="font-semibold">Transformer</div>
-                <div className={liveTrafo != null && liveTrafo > 100 ? "text-[var(--leo-bad)] font-medium" : "text-[var(--leo-text-dim)]"}>
-                  {liveTrafo != null ? `${liveTrafo.toFixed(0)}% of rating` : currentMode === "backup" ? "de-energised" : "—"}
+                <div className="flex items-baseline justify-between gap-2">
+                  <span className="font-semibold">Transformer</span>
+                  <span className={liveTrafo != null && liveTrafo > 100 ? "font-semibold text-[var(--leo-bad)]" : ""}>
+                    {currentMode === "backup" ? "off" : liveTrafo != null ? `${liveTrafo.toFixed(0)}%${liveTrafo > 100 ? " over" : ""}` : "—"}
+                  </span>
+                </div>
+                <div className="text-[var(--leo-text-dim)]">
+                  {currentMode === "backup" ? "De-energised, grid down" : withoutLeoTrafo != null ? `of rating · ${withoutLeoTrafo.toFixed(0)}% without LEO` : "of rating"}
                 </div>
               </div>
             </div>

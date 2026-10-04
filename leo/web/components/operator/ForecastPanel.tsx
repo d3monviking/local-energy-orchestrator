@@ -24,7 +24,7 @@ type Props = {
 function LoadingChart({ forecast, startTs, endTs, currentTs }: {
   forecast: Forecast; startTs: string; endTs: string; currentTs: string | null;
 }) {
-  const W = 300, H = 96, PAD = 4;
+  const W = 300, H = 104, PAD = 4;
   const t0 = ms(startTs), t1 = ms(endTs);
   const pts = forecast.intervals.filter((i) => ms(i.ts_end) >= t0 && ms(i.ts_end) <= t1);
   const maxPct = Math.max(120, ...pts.map((p) => Math.max(p.trafo_pred_pct ?? 0, p.trafo_actual_pct ?? 0)));
@@ -37,16 +37,16 @@ function LoadingChart({ forecast, startTs, endTs, currentTs }: {
   const actualPts = pts.filter((p) => p.trafo_actual_pct != null && (!currentTs || ms(p.ts_end) <= ms(currentTs)));
 
   return (
-    <svg viewBox={`0 0 ${W} ${H}`} className="w-full h-24" role="img"
+    <svg viewBox={`0 0 ${W} ${H}`} className="block h-auto w-full" role="img"
       aria-label="Transformer loading, forecast versus actual">
       <line x1={PAD} x2={W - PAD} y1={y(100)} y2={y(100)} stroke="#e0473e" strokeDasharray="3 3" strokeWidth={1} />
-      <text x={W - PAD} y={y(100) - 2} textAnchor="end" fontSize="8" fill="#e0473e">100% rating</text>
-      <polyline points={line("trafo_pred_pct")} fill="none" stroke="#9b7fe0" strokeWidth={1.5} strokeDasharray="4 2" />
+      <text x={W - PAD} y={y(100) - 4} textAnchor="end" fontSize="12" fill="#ff8a82">rating</text>
+      <polyline points={line("trafo_pred_pct")} fill="none" stroke="#a68cec" strokeWidth={1.5} strokeDasharray="4 2" />
       <polyline
         points={actualPts.map((p) => `${x(p.ts_end).toFixed(1)},${y(p.trafo_actual_pct as number).toFixed(1)}`).join(" ")}
         fill="none" stroke="#e6edf3" strokeWidth={1.5}
       />
-      {nowX != null && <line x1={nowX} x2={nowX} y1={0} y2={H} stroke="#3ba9ff" strokeWidth={1} />}
+      {nowX != null && <line x1={nowX} x2={nowX} y1={0} y2={H} stroke="#7cc4ff" strokeWidth={1} />}
     </svg>
   );
 }
@@ -71,25 +71,24 @@ export default function ForecastPanel({ forecast, events, actions, startTs, endT
   const now = currentTs ? ms(currentTs) : ms(startTs);
 
   return (
-    <div className="flex flex-col gap-3 min-h-0">
+    <section aria-labelledby="forecast-title" className="flex flex-col gap-3 min-h-0">
       <div>
-        <h2 className="text-sm font-semibold">What LEO predicted</h2>
+        <h2 id="forecast-title" className="text-[15px] font-semibold">What LEO predicted</h2>
         {forecast?.issued_at ? (
-          <p className="text-xs text-[var(--leo-text-dim)]">
-            Day-ahead forecast issued {fmtTime(forecast.issued_at, true)} IST, the evening before.
-            Based on tomorrow&apos;s weather forecast, calendar and past load.
+          <p className="text-[13px] text-[var(--leo-text-dim)]">
+            Made {fmtTime(forecast.issued_at, true)} IST, the evening before, from the weather forecast, calendar and past load.
           </p>
         ) : (
-          <p className="text-xs text-[var(--leo-text-dim)]">No forecast saved for this run.</p>
+          <p className="text-[13px] text-[var(--leo-text-dim)]">No forecast was saved for this recording.</p>
         )}
       </div>
 
       {forecast && forecast.intervals.length > 0 && (
         <div className="rounded-md border border-[var(--leo-border)] bg-[var(--leo-panel)] p-2">
-          <p className="text-xs mb-1">Transformer loading ({forecast.transformer_kva ?? 100} kVA)</p>
+          <p className="mb-1 text-[13px]">Transformer loading, % of its {forecast.transformer_kva ?? 100} kVA rating</p>
           <LoadingChart forecast={forecast} startTs={startTs} endTs={endTs} currentTs={currentTs} />
-          <div className="flex gap-3 text-[11px] text-[var(--leo-text-dim)]">
-            <span><span className="inline-block w-3 border-t-2 border-dashed border-[#9b7fe0] align-middle mr-1" />forecast (P90)</span>
+          <div className="flex gap-3 text-xs text-[var(--leo-text-dim)]">
+            <span><span className="inline-block w-3 border-t-2 border-dashed border-[#a68cec] align-middle mr-1" />forecast, bad-case (P90)</span>
             <span><span className="inline-block w-3 border-t-2 border-[#e6edf3] align-middle mr-1" />actual so far</span>
           </div>
         </div>
@@ -97,53 +96,53 @@ export default function ForecastPanel({ forecast, events, actions, startTs, endT
 
       <div className="flex flex-col gap-2 overflow-y-auto min-h-0 pr-1">
         {events.length === 0 && (
-          <p className="text-xs text-[var(--leo-text-dim)]">No events predicted for this day.</p>
+          <p className="text-[13px] text-[var(--leo-text-dim)]">The forecast predicted no problems for this day.</p>
         )}
         {events.map((ev, i) => {
-          const style = EVENT_STYLE[ev.type] ?? { color: "#93a1b0", label: ev.type };
+          const style = EVENT_STYLE[ev.type] ?? { color: "#93a1b0", text: "#c3ccd6", label: ev.type };
           const status = now < ms(ev.start) ? "upcoming" : now < ms(ev.end) ? "happening now" : "over";
           const revealed = now >= ms(ev.start);
           const response = leoEnabled ? relatedActions(ev, actions) : [];
           return (
-            <button
+            <article
               key={i}
-              onClick={() => onSeek(ev.start)}
-              className={`text-left rounded-md border p-2.5 bg-[var(--leo-panel)] hover:border-[var(--leo-accent)] ${
-                status === "happening now" ? "border-2" : "border-[var(--leo-border)]"
-              }`}
+              className={`rounded-md border bg-[var(--leo-panel)] p-2.5 ${status === "happening now" ? "border-2" : "border-[var(--leo-border)]"}`}
               style={status === "happening now" ? { borderColor: style.color } : undefined}
             >
-              <div className="flex items-center gap-2">
-                <span className="text-[10px] font-semibold uppercase rounded px-1.5 py-0.5"
-                  style={{ background: `${style.color}33`, color: style.color }}>
+              <div className="flex items-center gap-2 text-xs">
+                <span className="rounded px-1.5 py-0.5 font-semibold" style={{ background: `${style.color}26`, color: style.text }}>
                   {style.label}
                 </span>
                 {ev.missed && (
-                  <span className="text-[10px] rounded px-1.5 py-0.5 bg-[var(--leo-warn)]/20 text-[var(--leo-warn)]">missed by forecast</span>
+                  <span className="rounded px-1.5 py-0.5 bg-[rgb(224_167_46/0.15)] text-[var(--leo-warn)]">not forecast</span>
                 )}
-                <span className={`text-[10px] ml-auto ${status === "happening now" ? "text-[var(--leo-text)] font-semibold" : "text-[var(--leo-text-dim)]"}`}>
+                <span className={`ml-auto ${status === "happening now" ? "text-[var(--leo-text)] font-semibold" : "text-[var(--leo-text-dim)]"}`}>
                   {status}
                 </span>
               </div>
-              <p className="text-sm font-medium mt-1">{ev.title}</p>
-              <p className="text-xs text-[var(--leo-text-dim)]">
+              <h3 className="mt-1 text-sm font-medium">
+                <button type="button" onClick={() => onSeek(ev.start)} className="text-left hover:underline" aria-label={`${ev.title}. Move the replay to ${fmtTime(ev.start)} IST.`}>
+                  {ev.title}
+                </button>
+              </h3>
+              <p className="text-[13px] text-[var(--leo-text-dim)]">
                 {ev.type === "unplanned_outage" || ev.missed ? "Happened" : "Predicted"} {fmtTime(ev.start)}–{fmtTime(ev.end)} IST
                 {ev.predicted_at && ev.type !== "unplanned_outage" && <> · known since {fmtTime(ev.predicted_at, true)}</>}
               </p>
 
               {ev.why.length > 0 && (
-                <ul className="mt-1.5 text-xs list-disc pl-4 text-[var(--leo-text-dim)]">
+                <ul className="mt-1.5 text-[13px] list-disc pl-4 text-[var(--leo-text-dim)]">
                   {ev.why.map((w, j) => <li key={j}>{w}</li>)}
                 </ul>
               )}
 
-              <div className="mt-1.5 text-xs">
+              <div className="mt-1.5 text-[13px]">
                 <span className="font-medium">LEO&apos;s response: </span>
                 {!leoEnabled ? (
-                  <span className="text-[var(--leo-text-dim)]">none — LEO is off on this run</span>
+                  <span className="text-[var(--leo-text-dim)]">none, LEO is off in this recording</span>
                 ) : response.length === 0 ? (
                   <span className="text-[var(--leo-text-dim)]">
-                    {ev.type === "unplanned_outage" ? "react on detection (see action log)" : "nothing scheduled"}
+                    {ev.type === "unplanned_outage" ? "reacts when its sensors detect it (see the action log)" : "nothing scheduled"}
                   </span>
                 ) : (
                   <ul className="list-disc pl-4 text-[var(--leo-text-dim)]">
@@ -153,23 +152,23 @@ export default function ForecastPanel({ forecast, events, actions, startTs, endT
                 )}
               </div>
 
-              <div className="mt-1.5 text-xs">
+              <div className="mt-1.5 text-[13px]">
                 <span className="font-medium">Outcome: </span>
                 {!revealed ? (
-                  <span className="text-[var(--leo-text-dim)]">not yet — play forward</span>
+                  <span className="text-[var(--leo-text-dim)]">not reached yet in the replay</span>
                 ) : ev.actual ? (
                   <span>
                     happened {fmtTime(ev.actual.start)}–{fmtTime(ev.actual.end)} IST
-                    {ev.actual.worst != null && <>, worst {ev.actual.worst}{ev.type === "transformer_overload" ? "%" : " V"}</>}
+                    {ev.actual.worst != null && <>, worst {ev.actual.worst.toFixed(0)}{ev.type === "transformer_overload" ? "%" : " V"}</>}
                   </span>
                 ) : (
-                  <span className="text-[var(--leo-ok)]">avoided — did not occur</span>
+                  <span className="text-[var(--leo-ok)]">avoided, it did not happen</span>
                 )}
               </div>
-            </button>
+            </article>
           );
         })}
       </div>
-    </div>
+    </section>
   );
 }

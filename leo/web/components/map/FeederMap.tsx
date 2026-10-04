@@ -52,9 +52,10 @@ type NetworkResultRow = { bus_id: string; phase: string; voltage_v: number; load
 type BusState = { voltage_v: number; violation: boolean };
 
 const PHASE_COLOR: Record<string, [number, number, number]> = {
-  R: [224, 71, 62],
-  Y: [224, 167, 46],
-  B: [59, 169, 255],
+  // Phase identity, muted so it never reads as a voltage status.
+  R: [201, 143, 139],
+  Y: [201, 183, 127],
+  B: [142, 169, 207],
 };
 
 const POINT_STYLE: Record<
@@ -65,8 +66,8 @@ const POINT_STYLE: Record<
   bus: { radius: 2, color: [147, 161, 176] },
   transformer: { radius: 9, color: [230, 237, 243] },
   household: { radius: 3.5, color: [47, 191, 113] },
-  sensor: { radius: 5, color: [155, 127, 224] },
-  battery_block: { radius: 8, color: [59, 169, 255] },
+  sensor: { radius: 5, color: [147, 161, 176] },
+  battery_block: { radius: 8, color: [63, 198, 198] },
 };
 
 export type FeederMapProps = {
@@ -84,6 +85,10 @@ export type FeederMapProps = {
   onViolatingCount?: (n: number) => void;
   /** Show what the day-ahead forecast PREDICTED for this interval instead of what happened. */
   forecast?: boolean;
+};
+
+const FEATURE_LABEL: Record<FeederProperties["feature_type"], string> = {
+  line: "Line", bus: "Pole", transformer: "Transformer", household: "Home", sensor: "Sensor", battery_block: "Battery",
 };
 
 function voltageColor(v: number, nominal: number, limitPct: number): [number, number, number] {
@@ -153,6 +158,7 @@ export default function FeederMap({
   const [error, setError] = useState<string | null>(null);
   const [hover, setHover] = useState<PickingInfo | null>(null);
   const [busState, setBusState] = useState<Record<string, BusState> | null>(null);
+  const [deEnergised, setDeEnergised] = useState(false);
 
   useEffect(() => {
     let cancelled = false;
@@ -197,8 +203,9 @@ export default function FeederMap({
         if (!r.ok) throw new Error(`${r.status} ${r.statusText}`);
         return r.json();
       })
-      .then((d: { results: NetworkResultRow[] }) => {
+      .then((d: { results: NetworkResultRow[]; de_energised?: boolean }) => {
         if (cancelled) return;
+        setDeEnergised(!!d.de_energised);
         // A bus carries one voltage per phase; the map shows the worst
         // (furthest from nominal) phase at that bus, since that's the
         // one that would actually trip a protective device there.
@@ -291,10 +298,10 @@ export default function FeederMap({
       },
       getLineColor: (f) => {
         const onBackup = backupBusIds?.has(f.properties.bus_id ?? f.properties.id);
-        if (onBackup) return [59, 169, 255]; // distinct ring: on the backup circuit
+        if (onBackup) return [63, 198, 198]; // battery-coloured ring: on the backup circuit
         return f.properties.is_critical ? [230, 237, 243] : [0, 0, 0, 0];
       },
-      getLineWidth: (f) => (backupBusIds?.has(f.properties.bus_id ?? f.properties.id) ? 2 : 1),
+      getLineWidth: (f) => (backupBusIds?.has(f.properties.bus_id ?? f.properties.id) ? 2.5 : 1),
       lineWidthMinPixels: 1,
       stroked: true,
       radiusUnits: "pixels",
@@ -315,48 +322,58 @@ export default function FeederMap({
       />
 
       {error && (
-        <div className="absolute top-2 left-2 rounded-md bg-[var(--leo-bad)]/90 text-black text-xs px-2 py-1">
-          feeder data unavailable: {error}
+        <div role="alert" className="absolute top-2 left-2 rounded-md bg-[var(--leo-bad)] text-black text-[13px] px-2 py-1">
+          Map data could not be loaded ({error})
         </div>
       )}
 
-      <div className="absolute top-2 right-2 rounded-md bg-black/70 text-xs px-2 py-1.5 flex flex-col gap-1">
-        <span className="flex items-center gap-1.5">
-          <span className="inline-block w-2 h-2 rounded-full" style={{ background: "rgb(47,191,113)" }} />
-          healthy (within {(vLimitPct * 0.7).toFixed(1)}% of {nominalV}V)
+      {deEnergised && (
+        <div role="status" className="absolute bottom-8 left-2 max-w-xs rounded-md bg-black/80 px-3 py-2 text-[13px]">
+          <p className="font-semibold">Feeder de-energised</p>
+          <p className="text-[var(--leo-text-dim)]">No grid supply. Homes ringed in teal are on LEO&apos;s backup circuit.</p>
+        </div>
+      )}
+
+      <details open className="group absolute top-2 right-2 rounded-md bg-black/75 text-xs leading-snug">
+        <summary className="cursor-pointer select-none px-2.5 py-1.5 text-[var(--leo-text-dim)] hover:text-[var(--leo-text)]">
+          Legend
+        </summary>
+        <div className="flex flex-col gap-1 px-2.5 pb-2">
+        <span className="text-[var(--leo-text-dim)]">Voltage at each point</span>
+        <span className="flex items-center gap-2">
+          <span aria-hidden className="inline-block h-[3px] w-4 rounded" style={{ background: "rgb(47,191,113)" }} />
+          healthy
         </span>
-        <span className="flex items-center gap-1.5">
-          <span className="inline-block w-2 h-2 rounded-full" style={{ background: "rgb(224,167,46)" }} />
-          approaching limit ({(vLimitPct * 0.7).toFixed(1)}–{vLimitPct}% off nominal)
+        <span className="flex items-center gap-2">
+          <span aria-hidden className="inline-block h-[3px] w-4 rounded" style={{ background: "rgb(224,167,46)" }} />
+          near the limit
         </span>
-        <span className="flex items-center gap-1.5">
-          <span className="inline-block w-2 h-2 rounded-full" style={{ background: "rgb(224,71,62)" }} />
-          violating ({'>'}{vLimitPct}% off nominal — thicker line too)
+        <span className="flex items-center gap-2">
+          <span aria-hidden className="inline-block h-[5px] w-4 rounded" style={{ background: "rgb(224,71,62)" }} />
+          outside ±{vLimitPct}% of {nominalV} V (thick line)
         </span>
-        <span className="flex items-center gap-1.5">
-          <span className="inline-block w-2 h-2 rounded-full border border-[#3ba9ff]" style={{ background: "transparent" }} />
-          on backup power (outage run)
+        <span className="flex items-center gap-2">
+          <span aria-hidden className="inline-block h-2.5 w-2.5 rounded-full border-2" style={{ borderColor: "rgb(63,198,198)" }} />
+          on backup power
         </span>
-        <div className="border-t border-white/20 my-0.5" />
-        <span className="flex items-center gap-1.5">
-          <span className="inline-block w-2.5 h-2.5 rounded-full" style={{ background: "rgb(230,237,243)" }} />
-          transformer (DT site)
+        <span className="flex items-center gap-2">
+          <span aria-hidden className="inline-block h-2.5 w-2.5 rounded-full" style={{ background: "rgb(230,237,243)" }} />
+          transformer
         </span>
-        <span className="flex items-center gap-1.5">
-          <span className="inline-block w-2 h-2 rounded-full" style={{ background: "rgb(59,169,255)" }} />
-          battery block (one per phase, orbiting the DT)
+        <span className="flex items-center gap-2">
+          <span aria-hidden className="inline-block h-2.5 w-2.5 rounded-full" style={{ background: "rgb(63,198,198)" }} />
+          battery (one per phase)
         </span>
-        <span className="flex items-center gap-1.5">
-          <span className="inline-block w-1.5 h-1.5 rounded-full" style={{ background: "rgb(155,127,224)" }} />
-          sensor (busbar/far-end, per phase)
+        <span className="flex items-center gap-2">
+          <span aria-hidden className="inline-block h-2 w-2 rounded-full" style={{ background: "rgb(147,161,176)" }} />
+          sensor
         </span>
-      </div>
+        </div>
+      </details>
 
       {data && (
-        <div className="absolute bottom-2 left-2 rounded-md bg-black/60 text-xs text-[var(--leo-text-dim)] px-2 py-1 max-w-sm">
-          {data.properties.name} (DT {data.properties.dt_id}) — topology generated from
-          OpenStreetMap street geometry; conductor impedance is pandapower's LV overhead
-          standard types, a sanctioned stand-in for an IS 14255 datasheet (see Build Spec §6.4).
+        <div className="absolute bottom-1.5 left-2 rounded bg-black/60 px-1.5 py-0.5 text-[11px] text-[var(--leo-text-dim)]">
+          {data.properties.name} · {data.properties.dt_id} · streets © OpenStreetMap · imagery © Esri
         </div>
       )}
 
@@ -373,22 +390,21 @@ export default function FeederMap({
             style={{ left: hover.x + 12, top: hover.y + 12 }}
           >
             <span>
-              {props.feature_type}: {props.id}
+              {FEATURE_LABEL[props.feature_type]} {props.id}
               {props.phase && ` · phase ${props.phase}`}
             </span>
             {vState && (
               <span className={vState.violation ? "text-[var(--leo-bad)]" : "text-[var(--leo-ok)]"}>
-                {vState.voltage_v.toFixed(1)}V{vState.violation ? " (violation)" : ""}
+                {vState.voltage_v.toFixed(1)} V{vState.violation ? " (outside limits)" : ""}
               </span>
             )}
             {dispatchState && (
               <span className="text-[var(--leo-text-dim)]">
-                {dispatchState.actual_kw >= 0 ? "discharging" : "charging"} {Math.abs(dispatchState.actual_kw).toFixed(1)}kW ·
-                SoC {(dispatchState.soc_after * 100).toFixed(0)}% · {dispatchState.mode}
-                {dispatchState.rule_triggered && ` · ${dispatchState.rule_triggered}`}
+                {dispatchState.mode === "backup" ? "feeding the backup circuit" : Math.abs(dispatchState.actual_kw) < 0.05 ? "idle" : `${dispatchState.actual_kw > 0 ? "discharging" : "charging"} ${Math.abs(dispatchState.actual_kw).toFixed(1)} kW`} ·
+                {" "}{(dispatchState.soc_after * 100).toFixed(0)}% charged
               </span>
             )}
-            {props.is_critical && <span className="text-[var(--leo-warn)]">critical premise</span>}
+            {props.is_critical && <span>Critical premise (kept powered in outages)</span>}
           </div>
         );
       })()}

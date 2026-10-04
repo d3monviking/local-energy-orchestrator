@@ -21,7 +21,7 @@ export type TimelineSegment = {
   endTs: string; // ISO 8601
 };
 
-export type TimelineEventKind = "violation" | "dr_event" | "outage" | "restoration";
+export type TimelineEventKind = "violation" | "dr_event" | "outage" | "restoration" | "escalation";
 
 export type TimelineEventMarker = {
   ts: string; // ISO 8601
@@ -58,7 +58,18 @@ const EVENT_COLOR: Record<TimelineEventKind, string> = {
   dr_event: "var(--leo-accent)",
   outage: "var(--leo-bad)",
   restoration: "var(--leo-ok)",
+  escalation: "var(--leo-warn)",
 };
+
+const EVENT_LABEL: Record<TimelineEventKind, string> = {
+  violation: "Problem",
+  dr_event: "DR window",
+  outage: "Grid lost",
+  restoration: "Grid back",
+  escalation: "Sent to DISCOM",
+};
+
+const SPEED_LABEL: Record<number, string> = { 60: "1 min per second", 300: "5 min per second", 900: "15 min per second", 3600: "1 hour per second" };
 
 const SPEED_OPTIONS = [60, 300, 900, 3600];
 
@@ -200,6 +211,9 @@ export default function Timeline({
       e.preventDefault();
       setPlaying(false);
       emit(startMs);
+    } else if (e.key === " " || e.key === "k") {
+      e.preventDefault();
+      setPlaying((p) => !p);
     } else if (e.key === "End") {
       e.preventDefault();
       setPlaying(false);
@@ -207,14 +221,27 @@ export default function Timeline({
     }
   };
 
+  // IST labels every 3 hours, inset so the end labels never clip.
+  const hourTicks = useMemo(() => {
+    const out: number[] = [];
+    for (let t = Math.ceil(startMs / 3_600_000) * 3_600_000; t <= endMs; t += 3_600_000) {
+      const h = Number(new Date(t).toLocaleString("en-GB", { timeZone: "Asia/Kolkata", hour: "2-digit", hour12: false }));
+      const frac = (t - startMs) / durationMs;
+      if (h % 3 === 0 && frac > 0.02 && frac < 0.98) out.push(t);
+    }
+    return out;
+  }, [startMs, endMs, durationMs]);
+
   const playheadFrac = clamp((currentMs - startMs) / durationMs, 0, 1);
 
   return (
     <div className="w-full select-none">
       <div className="flex items-center gap-3 mb-2">
         <button
+          type="button"
+          aria-label={playing ? "Pause replay" : "Play replay"}
           onClick={() => setPlaying((p) => !p)}
-          className="rounded-md border border-[var(--leo-border)] bg-[var(--leo-panel-raised)] px-3 py-1 text-sm hover:border-[var(--leo-accent)]"
+          className="w-16 rounded-md border border-[var(--leo-border)] bg-[var(--leo-panel-raised)] px-3 py-1 text-sm hover:border-[var(--leo-accent)]"
         >
           {playing ? "Pause" : "Play"}
         </button>
@@ -227,7 +254,7 @@ export default function Timeline({
         >
           {SPEED_OPTIONS.map((s) => (
             <option key={s} value={s}>
-              {s}x
+              {SPEED_LABEL[s] ?? `${s}x`}
             </option>
           ))}
         </select>
@@ -236,15 +263,12 @@ export default function Timeline({
           {fmtIST(currentMs)}
         </span>
 
-        <span className="ml-auto text-xs text-[var(--leo-text-dim)]">
-          run <code className="text-[var(--leo-text)]">{runId}</code>
-          {overlayRunId && (
-            <>
-              {" "}
-              vs <code className="text-[var(--leo-text)]">{overlayRunId}</code>
-            </>
-          )}
-        </span>
+        <ul className="ml-auto hidden flex-wrap items-center gap-x-4 gap-y-1 text-xs text-[var(--leo-text-dim)] md:flex">
+          <li className="flex items-center gap-1.5"><span aria-hidden className="inline-block h-1 w-4 rounded" style={{ background: "#e0473e" }} />predicted problem</li>
+          {(Array.from(new Set(events.map((e) => e.kind)))).map((k) => (
+            <li key={k} className="flex items-center gap-1.5"><span aria-hidden className="inline-block h-2 w-2 rounded-full" style={{ background: EVENT_COLOR[k] }} />{EVENT_LABEL[k]}</li>
+          ))}
+        </ul>
       </div>
 
       <div
@@ -254,35 +278,13 @@ export default function Timeline({
         onKeyDown={onTrackKeyDown}
         role="slider"
         tabIndex={0}
-        aria-label="Timeline scrub"
+        aria-label="Replay time. Arrow keys step 15 minutes, Space plays or pauses."
         aria-valuemin={startMs}
         aria-valuemax={endMs}
         aria-valuenow={currentMs}
         aria-valuetext={fmtIST(currentMs)}
-        className="relative h-14 rounded-md border border-[var(--leo-border)] bg-[var(--leo-panel)] cursor-pointer overflow-hidden focus:outline focus:outline-2 focus:outline-[var(--leo-accent)]"
+        className="relative h-12 rounded-md border border-[var(--leo-border)] bg-[var(--leo-panel)] cursor-pointer overflow-hidden"
       >
-        {segments.map((seg, i) => {
-          const segStart = new Date(seg.startTs).getTime();
-          const segEnd = new Date(seg.endTs).getTime();
-          const left = clamp(((segStart - startMs) / durationMs) * 100, 0, 100);
-          const width = clamp(((segEnd - segStart) / durationMs) * 100, 0, 100);
-          return (
-            <div
-              key={i}
-              title={seg.kind}
-              style={{
-                position: "absolute",
-                left: `${left}%`,
-                width: `${width}%`,
-                top: 0,
-                bottom: 0,
-                background: SEGMENT_COLOR[seg.kind],
-                opacity: 0.35,
-              }}
-            />
-          );
-        })}
-
         {bands.map((b, i) => {
           const bs = new Date(b.startTs).getTime();
           const be = new Date(b.endTs).getTime();
@@ -294,7 +296,7 @@ export default function Timeline({
               title={b.label}
               style={{
                 position: "absolute", left: `${left}%`, width: `${width}%`,
-                bottom: 2 + (i % 4) * 5, height: 4, borderRadius: 2, background: b.color, opacity: 0.85,
+                bottom: 3 + (i % 4) * 6, height: 4, borderRadius: 2, background: b.color, opacity: 0.85,
               }}
             />
           );
@@ -306,8 +308,9 @@ export default function Timeline({
           return (
             <button
               key={i}
-              title={`${ev.kind}: ${ev.label}`}
-              aria-label={`${ev.kind}: ${ev.label} at ${fmtIST(new Date(ev.ts).getTime())}`}
+              type="button"
+              title={`${EVENT_LABEL[ev.kind]}: ${ev.label}`}
+              aria-label={`Jump to ${EVENT_LABEL[ev.kind]}: ${ev.label}, ${fmtIST(new Date(ev.ts).getTime())}`}
               onClick={(e) => {
                 e.stopPropagation();
                 setPlaying(false);
@@ -360,14 +363,10 @@ export default function Timeline({
         />
       </div>
 
-      <div className="flex gap-4 mt-1 text-xs text-[var(--leo-text-dim)]">
-        {(Object.keys(SEGMENT_COLOR) as SegmentKind[]).map((k) => (
-          <span key={k} className="flex items-center gap-1">
-            <span
-              className="inline-block w-2 h-2 rounded-sm"
-              style={{ background: SEGMENT_COLOR[k] }}
-            />
-            {k}
+      <div aria-hidden className="relative mt-1 h-4 text-xs text-[var(--leo-text-dim)]">
+        {hourTicks.map((t) => (
+          <span key={t} className="absolute -translate-x-1/2" style={{ left: `${((t - startMs) / durationMs) * 100}%` }}>
+            {new Date(t).toLocaleTimeString("en-GB", { timeZone: "Asia/Kolkata", hour: "2-digit", minute: "2-digit", hour12: false })}
           </span>
         ))}
       </div>

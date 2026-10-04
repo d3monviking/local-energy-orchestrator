@@ -71,7 +71,7 @@ function Kpi({ title, base, leo, unit, better, note }: {
 }) {
   return (
     <div className="rounded-lg border border-[var(--leo-border)] bg-[var(--leo-panel)] p-4 flex flex-col gap-1">
-      <p className="text-xs uppercase tracking-wide text-[var(--leo-text-dim)]">{title}</p>
+      <p className="text-[13px] font-medium text-[var(--leo-text-dim)]">{title}</p>
       <p className="text-2xl font-semibold">
         <span className="text-[var(--leo-text-dim)] text-lg">{base}</span>
         <span className="mx-2 text-[var(--leo-text-dim)]">→</span>
@@ -101,13 +101,13 @@ function MonthlyChart({ rows, config, field, label, unit, refLine, refLabel }: {
         {[0, 0.5, 1].map((f) => (
           <g key={f}>
             <line x1={L} x2={W - R} y1={y(max * f)} y2={y(max * f)} stroke="var(--leo-border)" strokeWidth={0.5} />
-            <text x={L - 4} y={y(max * f) + 3} fontSize="9" textAnchor="end" fill="var(--leo-text-dim)">{num(max * f)}</text>
+            <text x={L - 4} y={y(max * f) + 3} fontSize="11" textAnchor="end" fill="var(--leo-text-dim)">{num(max * f)}</text>
           </g>
         ))}
         {refLine != null && (
           <g>
             <line x1={L} x2={W - R} y1={y(refLine)} y2={y(refLine)} stroke="var(--leo-bad)" strokeDasharray="4 3" strokeWidth={1} />
-            <text x={W - R} y={y(refLine) - 3} fontSize="9" textAnchor="end" fill="var(--leo-bad)">{refLabel}</text>
+            <text x={W - R} y={y(refLine) - 3} fontSize="11" textAnchor="end" fill="var(--leo-bad)">{refLabel}</text>
           </g>
         )}
         {months.map((m, i) => (
@@ -118,13 +118,13 @@ function MonthlyChart({ rows, config, field, label, unit, refLine, refLabel }: {
             <rect x={x(i) + 1} y={y(get(config, m))} width={bw} height={H - B - y(get(config, m))} fill="var(--leo-accent)">
               <title>{`With LEO, ${m.slice(0, 7)}: ${num(get(config, m), 1)} ${unit}`}</title>
             </rect>
-            <text x={x(i)} y={H - 8} fontSize="9" textAnchor="middle" fill="var(--leo-text-dim)">
+            <text x={x(i)} y={H - 8} fontSize="11" textAnchor="middle" fill="var(--leo-text-dim)">
               {new Date(m).toLocaleString("en-IN", { month: "short" })}
             </text>
           </g>
         ))}
       </svg>
-      <div className="flex gap-4 text-[11px] text-[var(--leo-text-dim)]">
+      <div className="flex gap-4 text-xs text-[var(--leo-text-dim)]">
         <span><span className="inline-block w-2.5 h-2.5 mr-1 align-middle bg-[#5b6673]" />No LEO</span>
         <span><span className="inline-block w-2.5 h-2.5 mr-1 align-middle bg-[var(--leo-accent)]" />With LEO</span>
         <span className="ml-auto">{unit}</span>
@@ -138,7 +138,7 @@ function Ledger({ title, lines, total, totalLabel, tone }: {
 }) {
   return (
     <div>
-      <p className="text-xs uppercase tracking-wide text-[var(--leo-text-dim)] mb-1">{title}</p>
+      <p className="text-[13px] font-medium text-[var(--leo-text-dim)] mb-1">{title}</p>
       <table className="w-full text-sm">
         <tbody>
           {lines.map(([k, v]) => (
@@ -301,7 +301,7 @@ export default function ImpactReport() {
   const maxNpv = Math.max(...r.sensitivity.map((s) => Math.abs(s.operator_npv)), Math.abs(o.npv)) || 1;
 
   return (
-    <main id="main-content" className="p-6 max-w-6xl flex flex-col gap-6">
+    <main id="main-content" className="mx-auto flex w-full max-w-[1180px] flex-col gap-6 px-6 pb-16 pt-6">
       <header>
         <div className="flex flex-wrap items-center gap-3">
           <h1 className="text-lg font-semibold">Impact &amp; economics</h1>
@@ -332,7 +332,7 @@ export default function ImpactReport() {
               }`}
             >
               {x.label}
-              {x.config === data.recommended_storage && <span className="ml-1.5 text-[10px] text-[var(--leo-ok)]">best with storage</span>}
+              {x.config === data.recommended_storage && <span className="ml-1.5 text-xs text-[var(--leo-ok)]">best with storage</span>}
             </button>
           ))}
         </div>
@@ -436,10 +436,10 @@ export default function ImpactReport() {
                 <dd className="text-xl font-semibold">{rs(r.discom.gross_saving * 1000)}<span className="text-xs font-normal">/yr</span></dd></div>
               <div><dt className="text-xs text-[var(--leo-text-dim)]">Technical losses saved</dt>
                 <dd className="text-xl font-semibold">{num((rel.loss_kwh_base ?? 0) - (rel.loss_kwh ?? 0))}<span className="text-xs font-normal"> kWh/yr</span></dd>
-                <dd className="text-[10px] text-[var(--leo-text-dim)]">{num(100 * (1 - (rel.loss_kwh ?? 0) / (rel.loss_kwh_base || 1)), 1)}% of this DT&apos;s I²R + transformer losses</dd></div>
+                <dd className="text-xs text-[var(--leo-text-dim)]">{num(100 * (1 - (rel.loss_kwh ?? 0) / (rel.loss_kwh_base || 1)), 1)}% of this DT&apos;s I²R + transformer losses</dd></div>
               <div><dt className="text-xs text-[var(--leo-text-dim)]">Evening power not bought</dt>
                 <dd className="text-xl font-semibold">{num(r.physical.flex_kwh / 1000, 1)}<span className="text-xs font-normal"> MWh/yr</span></dd>
-                <dd className="text-[10px] text-[var(--leo-text-dim)]">at ₹10/kWh, refilled at ₹1.91 midday</dd></div>
+                <dd className="text-xs text-[var(--leo-text-dim)]">at ₹10/kWh, refilled at ₹1.91 midday</dd></div>
             </dl>
             <Ledger title="Each year, vs no LEO"
               lines={Object.entries(r.discom).filter(([k]) => !["net", "max_rate_rs_per_kwh", "npv", "gross_saving"].includes(k)) as [string, number][]}
@@ -483,7 +483,7 @@ export default function ImpactReport() {
                 </table>
               );
             })()}
-            <p className="text-[10px] text-[var(--leo-text-dim)]">
+            <p className="text-xs text-[var(--leo-text-dim)]">
               ToD saving applies if KERC extends ToD to LT domestic (the amended Rights of Consumers Rules allow up to 20%).
               Tata Power-DDL&apos;s pilot paid ₹250/event (₹50/100 tiers too), 12–16 events a year.
             </p>

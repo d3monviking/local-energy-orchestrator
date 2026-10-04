@@ -8,7 +8,7 @@ export default function OperatorLayout({ children }: { children: React.ReactNode
         nav={[
           { href: "/operator", label: "Map" },
           { href: "/operator/plan", label: "Plan review" },
-          { href: "/operator/live", label: "Live ops" },
+          { href: "/operator/live", label: "Live" },
           { href: "/operator/dr", label: "DR events" },
           { href: "/operator/settlement", label: "Settlement" },
           { href: "/operator/members", label: "Members" },

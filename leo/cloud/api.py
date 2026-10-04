@@ -12,7 +12,7 @@ from __future__ import annotations
 import json
 import os
 from contextlib import asynccontextmanager
-from datetime import datetime
+from datetime import datetime, timedelta
 
 import asyncpg
 
@@ -239,6 +239,10 @@ async def network_result_at(run_id: str, ts_end: str, forecast: bool = False) ->
         )
         if nearest is None:
             raise HTTPException(404, f"no network_result rows for run_id {run_id!r}")
+        # No power-flow row within one interval means the feeder was dark
+        # (outage): say so instead of showing the last energised state.
+        if nearest["ts_end"] < ts_end_dt and (ts_end_dt - nearest["ts_end"]).total_seconds() >= 15 * 60:
+            return {"run_id": run_id, "ts_end": None, "results": [], "de_energised": True}
 
         rows = await conn.fetch(
             """SELECT bus_id, phase, voltage_v, loading_pct, violation
@@ -433,6 +437,36 @@ async def approve_plan_endpoint(run_id: str, phase: str, approved_by: str = "ope
         raise HTTPException(404, f"no plan for run_id={run_id!r} phase={phase!r}")
     return {"run_id": run_id, "phase": phase, "approved_at": row["approved_at"].isoformat(),
             "approved_by": row["approved_by"]}
+
+
+@app.post("/api/plan/{run_id}/approve")
+async def approve_whole_plan(run_id: str, approved_by: str = "operator-1") -> dict:
+    """Approve all three phases in one decision (the Plan review screen's
+    single Approve). The approval is stamped at the run's own 23:30 IST
+    slot on D-1, not wall-clock now(), so replaying a recorded day keeps
+    "plan approved" and "DR offers sent" in the right place on the timeline."""
+    async with pool.acquire() as conn:
+        sim_start = await conn.fetchval("SELECT sim_start FROM run WHERE run_id = $1", run_id)
+        if sim_start is None:
+            raise HTTPException(404, f"no run {run_id!r}")
+        stamp = sim_start - timedelta(hours=6)
+        await conn.execute(
+            "UPDATE plan SET approved_at = $2, approved_by = $3 WHERE run_id = $1 AND approved_at IS NULL",
+            run_id, stamp, approved_by,
+        )
+        row = await conn.fetchrow(
+            "SELECT min(approved_at) AS approved_at, max(approved_by) AS approved_by FROM plan WHERE run_id = $1", run_id)
+    return {"run_id": run_id, "approved_at": row["approved_at"].isoformat() if row["approved_at"] else None,
+            "approved_by": row["approved_by"]}
+
+
+@app.post("/api/plan/{run_id}/withdraw")
+async def withdraw_plan(run_id: str) -> dict:
+    """Withdraw approval (undo, or reset the demo). Nothing reaches the
+    batteries from an unapproved plan."""
+    async with pool.acquire() as conn:
+        await conn.execute("UPDATE plan SET approved_at = NULL, approved_by = NULL WHERE run_id = $1", run_id)
+    return {"run_id": run_id, "approved_at": None, "approved_by": None}
 
 
 @app.get("/api/dr_events/{run_id}")

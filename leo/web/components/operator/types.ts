@@ -65,10 +65,11 @@ export function fmtTime(ts: string, withDay = false): string {
   });
 }
 
-export const EVENT_STYLE: Record<string, { color: string; label: string }> = {
-  transformer_overload: { color: "#e0473e", label: "Overload" },
-  undervoltage: { color: "#e0a72e", label: "Undervoltage" },
-  overvoltage: { color: "#9b7fe0", label: "Overvoltage" },
-  load_shedding: { color: "#3ba9ff", label: "Load shedding" },
-  unplanned_outage: { color: "#e0473e", label: "Outage" },
+/** color: fills and strokes. text: the same meaning at ≥4.5:1 on the panels. */
+export const EVENT_STYLE: Record<string, { color: string; text: string; label: string }> = {
+  transformer_overload: { color: "#e0473e", text: "#ff6b61", label: "Overload" },
+  undervoltage: { color: "#e0a72e", text: "#e0a72e", label: "Low voltage" },
+  overvoltage: { color: "#e0a72e", text: "#e0a72e", label: "High voltage" },
+  load_shedding: { color: "#93a1b0", text: "#c3ccd6", label: "Load shedding" },
+  unplanned_outage: { color: "#e0473e", text: "#ff6b61", label: "Outage" },
 };

@@ -13,17 +13,59 @@
 
   --leo-ok: #2fbf71;
   --leo-warn: #e0a72e;
-  --leo-bad: #e0473e;
+  --leo-bad: #ff6b61; /* lifted from #e0473e: 4.3:1 on panels failed AA */
+  --leo-bad-fill: #e0473e; /* fills and strokes only, never text */
 
   --leo-recorded: #3ba9ff;
   --leo-live: #2fbf71;
-  --leo-forecast: #9b7fe0;
+  --leo-forecast: #a68cec;
+
+  /* Phases are identity, not status: muted swatches, always shown with
+     the letter, so they never read as ok / warn / bad. */
+  --leo-phase-r: #c98f8b;
+  --leo-phase-y: #c9b77f;
+  --leo-phase-b: #8ea9cf;
+
+  /* Battery charge / discharge: one hue, direction carries the meaning. */
+  --leo-battery: #3fc6c6;
+
+  --leo-focus: #7cc4ff;
 }
 
 html,
 body {
   background: var(--leo-bg);
   color: var(--leo-text);
+}
+
+body {
+  font-family: var(--font-plex), ui-sans-serif, system-ui, sans-serif;
+  font-size: 15px;
+  line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* Numbers line up in every table, card and timestamp. */
+body {
+  font-variant-numeric: tabular-nums;
+}
+
+::selection {
+  background: rgb(59 169 255 / 0.35);
+  color: var(--leo-text);
+}
+
+:focus-visible {
+  outline: 2px solid var(--leo-focus);
+  outline-offset: 2px;
+  border-radius: 4px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    transition-duration: 0.01ms !important;
+    animation-duration: 0.01ms !important;
+  }
 }
 
 * {
