@@ -89,8 +89,8 @@ DR_SEARCH_IST = (17.0, 21.0)  # window may start anywhere in this range
 # DR is a scarce resource (offer fatigue, flat Rs 25-100 payouts) and DFPO
 # pays for kW at the peak instant, so events are called only on the most
 # stressed days: forecast evening peak >= ~1.5x the transformer rating,
-# the top ~2% of days (~8 events/yr).
-DR_EVENT_MIN_PEAK_KW = 146.0
+# the top ~5% of days (~20 events/yr) - a DFPO peak season.
+DR_EVENT_MIN_PEAK_KW = 140.0
 MONTHLY_OFFER_CAP, MIN_DAYS_BETWEEN_OFFERS = 4, 3  # cloud/dr_engine/selection.py
 HOLDOUT_FRAC = 0.10
 
@@ -115,6 +115,11 @@ CONFIGS = {
     # (research: 7.5-15 kW units ~Rs 1.2 L each), so use all of it.
     "leo_45_15": {"battery": (45.0, 15.0), "dr": True, "label": "LEO, 3 x 45 kWh, 15 kW inverters"},
     "leo_60_15": {"battery": (60.0, 15.0), "dr": True, "label": "LEO, 3 x 60 kWh, 15 kW inverters"},
+    # Automated DR: smart pump relays (daily shift to midday) and smart AC
+    # controllers (curtailment on DFPO event days), on top of SMS DR.
+    "smart_only": {"battery": None, "dr": True, "smart": True, "label": "LEO software + automated DR, no storage"},
+    "leo_30_15_smart": {"battery": (30.0, 15.0), "dr": True, "smart": True, "label": "LEO, 3 x 30 kWh + automated DR"},
+    "leo_60_15_smart": {"battery": (60.0, 15.0), "dr": True, "smart": True, "label": "LEO, 3 x 60 kWh + automated DR"},
 }
 
 W: dict = {}  # the world, built once in the parent and inherited by forked workers
@@ -186,6 +191,21 @@ def record_response(a: dict, level: float, resp) -> None:
     else:
         a["ao"] += 1
         a["ar"] += ok
+
+
+def smart_enrolment(scenario: dict | None = None) -> tuple[int, int]:
+    """(enrolled pumps, enrolled ACs) - same draws as build_world, without
+    building the loads (ownership is the first draw on the world rng)."""
+    from world.households import assign_ownership_and_truth
+    scenario = scenario or load_scenario()
+    feeder = build_feeder(scenario)
+    _, _, own = assign_ownership_and_truth(feeder.household, scenario["households"]["shares"],
+                                           np.random.default_rng(scenario["sim"]["seed"]))
+    sd = scenario.get("smart_dr", {})
+    erng = np.random.default_rng(scenario["sim"]["seed"] + 3)
+    pump = own["has_pump"].to_numpy(bool) & (erng.random(len(own)) < sd.get("pump_relay_share", 0.0))
+    ac = own["has_ac"].to_numpy(bool) & (erng.random(len(own)) < sd.get("ac_controller_share", 0.0))
+    return int(pump.sum()), int(ac.sum())
 
 
 def pretrain_bandit(hh: pd.DataFrame, rng: np.random.Generator) -> tuple[LinUCB, dict]:
@@ -279,6 +299,14 @@ def build_world(months: list[int] | None) -> None:
     cache.write_bytes(pickle.dumps({**cached, **forecasts}))
 
     bandit, engagement = pretrain_bandit(hh, np.random.default_rng(scenario["sim"]["seed"] + 2))
+
+    # Automated-DR enrolment: its own rng so the world is unchanged.
+    sd = scenario.get("smart_dr", {})
+    erng = np.random.default_rng(scenario["sim"]["seed"] + 3)
+    has_pump = hh["id"].map(truth["has_pump"]).fillna(False).to_numpy(bool)
+    has_ac = hh["id"].map(truth["has_ac"]).fillna(False).to_numpy(bool)
+    hh["smart_pump"] = has_pump & (erng.random(len(hh)) < sd.get("pump_relay_share", 0.0))
+    hh["smart_ac"] = has_ac & (erng.random(len(hh)) < sd.get("ac_controller_share", 0.0))
 
     W.update(dict(
         scenario=scenario, feeder=feeder, weather=weather.set_index("ts"), hh=hh,
@@ -403,7 +431,28 @@ def run_task(task: tuple[str, int]) -> list[dict]:
         dr_red = np.zeros_like(base)
         m_dr = {"events": 0, "offers": 0, "accepted": 0, "holdout": 0, "verified_kwh": 0.0,
                 "incentive_rs": 0.0, "rebound_kwh": 0.0, "target_kw": 0.0, "reduction_kw": 0.0,
-                "offered_rs": {}}
+                "offered_rs": {}, "pump_shift_kwh": 0.0, "pump_shift_hh": 0, "ac_events": 0,
+                "ac_participants": 0, "ac_curtail_kwh": 0.0, "ac_curtail_kw": 0.0, "ac_paid_rs": 0.0,
+                "precool_kwh": 0.0, "ac_rebound_kwh": 0.0}
+        sd = sc.get("smart_dr", {})
+        smart = bool(cfg.get("smart"))
+        if smart:
+            # Daily automated load shift: enrolled pumps skip their 18-19 IST
+            # run; LEO schedules it in the midday hour with the most forecast
+            # solar surplus (lowest forecast feeder load).
+            eve = [i for i in range(96) if 18.0 <= local_h[i] - 0.25 < 19.0]
+            lo, hi = sd["shift_window_ist"]
+            fc_tot = sum(fc[p]["p50"] for p in PHASES)
+            cand = [i for i in range(92) if lo <= local_h[i] - 0.25 and local_h[i + 3] <= hi]
+            s0 = min(cand, key=lambda i: fc_tot[i:i + 4].sum())
+            m_dr["pump_slot_ist"] = float(local_h[s0] - 0.25)
+            for i in np.where(hh["smart_pump"].to_numpy())[0]:
+                if rng.random() < sd["pump_override_prob"]:
+                    continue
+                dr_red[eve, i] += 0.75
+                dr_red[s0:s0 + 4, i] -= 0.75
+                m_dr["pump_shift_kwh"] += 0.75 * len(eve) * DT_H
+                m_dr["pump_shift_hh"] += 1
         if cfg["dr"]:
             resid = {p: fc[p]["p50"] - np.clip(plan[p], 0, None) for p in PHASES}
             excess = sum(np.clip(resid[p] - rating_kw_phase, 0, None) for p in PHASES)
@@ -415,10 +464,35 @@ def run_task(task: tuple[str, int]) -> list[dict]:
                 win = slice(w0, w0 + DR_WINDOW_INTERVALS)
                 m_dr["events"] = 1
                 temp = float(ambient[win].mean())
+                ac_kw_by_phase = {p: 0.0 for p in PHASES}
+                if smart:
+                    # Automated AC event: enrolled ACs cycle down for the window,
+                    # pre-cool in the 2 h before, small rebound after.
+                    m_dr["ac_events"] = 1
+                    ac_duty = np.clip((ambient - 26.0) / 8.0, 0.0, 1.0) * ((local_h >= 10) & (local_h <= 23))
+                    pre = slice(max(0, w0 - 8), w0)
+                    post = slice(w0 + DR_WINDOW_INTERVALS, w0 + 2 * DR_WINDOW_INTERVALS)
+                    for i in np.where(hh["smart_ac"].to_numpy())[0]:
+                        if rng.random() < sd["override_prob"]:
+                            continue
+                        cut = np.minimum(sd["ac_curtail_frac"] * 1.5 * ac_duty[win], np.clip(base[win, i], 0, None))
+                        e = float(cut.sum() * DT_H)
+                        if e <= 0:
+                            continue
+                        dr_red[win, i] += cut
+                        dr_red[pre, i] -= sd["precool_frac"] * e / (8 * DT_H)
+                        dr_red[post, i] -= sd["rebound_frac"] * e / (8 * DT_H)
+                        m_dr["ac_participants"] += 1
+                        m_dr["ac_curtail_kwh"] += e
+                        m_dr["ac_curtail_kw"] += float(cut.mean())
+                        m_dr["precool_kwh"] += sd["precool_frac"] * e
+                        m_dr["ac_rebound_kwh"] += sd["rebound_frac"] * e
+                        m_dr["ac_paid_rs"] += sd["ac_event_payment_rs"]
+                        ac_kw_by_phase[hh["phase"].iat[i]] += float(cut.mean())
                 event = {"start_hour_frac": (local_h[w0] - 0.25) / 24, "duration_hours": 2.0,
                          "day_of_week_frac": d.weekday() / 7, "forecast_temp_c": temp, "hours_notice": 20.0}
                 for p in PHASES:
-                    target = float(np.clip(resid[p][win] - rating_kw_phase, 0, None).max())
+                    target = float(np.clip(resid[p][win] - rating_kw_phase, 0, None).max()) - ac_kw_by_phase[p]
                     if target <= 0:
                         continue
                     m_dr["target_kw"] += target
@@ -426,7 +500,8 @@ def run_task(task: tuple[str, int]) -> list[dict]:
                         past = last_offer.get(hid, [])
                         return (not past or (d - past[-1]).days >= MIN_DAYS_BETWEEN_OFFERS) and \
                             sum((d - x).days < 30 for x in past) < MONTHLY_OFFER_CAP
-                    pool = [i for i in np.where(phase_mask[p])[0] if eligible(hh["id"].iat[i])]
+                    pool = [i for i in np.where(phase_mask[p])[0] if eligible(hh["id"].iat[i])
+                            and not (smart and hh["smart_ac"].iat[i])]
                     rng.shuffle(pool)
                     n_hold = int(len(pool) * HOLDOUT_FRAC)
                     m_dr["holdout"] += n_hold

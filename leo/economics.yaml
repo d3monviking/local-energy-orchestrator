@@ -64,7 +64,12 @@ dfpo:
   # MERC 2024: Rs 0.20 Cr/MW = Rs 2,000/kW shortfall penalty, and an equal
   # incentive for over-achievement. KERC 2026 (target 0.5% -> 2.0% of peak) mirrors MERC.
   penalty_rs_per_kw_year: 2000        # research
-  payment_rs_per_kw_year: 6900        # negotiated, inside the deal zone (~Rs 6,600-7,165 for 3x60 kWh): Rs 2,000/kW-yr DFPO capacity (MERC benchmark, research) + ~Rs 5/kWh for verified evening discharge, ~60% of the DISCOM's Rs 8+/kWh peak-purchase saving
+  # Two-part contract with the DISCOM: capacity at the MERC benchmark plus
+  # a payment per verified kWh of evening reduction (battery discharge, SMS
+  # DR, AC events, shifted pump load). The deal zone is solved on the
+  # energy part.
+  evening_energy_rs_per_kwh: 5.0      # negotiated, inside the deal zone; ~60% of the DISCOM's ~Rs 8/kWh evening-vs-midday saving
+  payment_rs_per_kw_year: 2000        # research: MERC benchmark Rs 2,000/kW (capacity part of the contract)
   # Verified kW = mean cut in the DT's evening peak on the year's most
   # stressed days (the days a peak-instance measurement would fall on).
   verification_top_day_share: 0.10
@@ -88,6 +93,14 @@ discom:
   dt_failure_repair_hours: 48         # verify: KERC Standards of Performance, rural DT replacement time
   value_of_lost_load_rs_per_kwh: 40   # verify: used for the societal outage value only
   technical_loss_pct: 9.13            # research: BESCOM AT&C FY 2023-24 (context; losses are computed by the power flow)
+
+smart_dr:
+  # Enrolment shares, AC curtailment and the per-event payment are in
+  # scenario.yaml (they drive the simulation); costs are here.
+  pump_relay_rs: 2500                 # verify: smart relay/contactor + install for a 0.75 kW pump
+  ac_controller_rs: 3500              # verify: smart AC controller (IR blaster / smart plug with power metering)
+  pump_fee_rs_per_month: 100          # verify: paid to each enrolled pump household for letting LEO schedule it
+  device_life_years: 5                # verify
 
 backup:
   fee_rs_per_kwh: 12.0                # verify: member-agreed; vs diesel ~Rs 25-30/kWh

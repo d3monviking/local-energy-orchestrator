@@ -60,7 +60,7 @@ function relatedActions(ev: PredictedEvent, actions: ActionItem[]): ActionItem[]
     if (a.kind.startsWith("battery_") && a.meta?.source === "plan") return phaseOk && t >= s && t <= e;
     if (a.kind.startsWith("battery_") && a.meta?.source === "live") return phaseOk && t >= ms(ev.start) && t <= e;
     if (a.kind.startsWith("battery_") && a.meta?.source === "pre_outage") return ev.type === "load_shedding";
-    if (a.kind === "dr_offers") return ev.type !== "overvoltage" && ev.type !== "load_shedding";
+    if (a.kind === "dr_offers" || a.kind === "dr_auto_ac" || a.kind === "dr_auto_shift") return ev.type !== "overvoltage" && ev.type !== "load_shedding";
     if (a.kind === "alert_sent" || (a.kind === "mode" && a.meta?.to === "pre_outage")) return ev.type === "load_shedding";
     if (a.kind === "recommendation") return phaseOk && ev.type !== "transformer_overload";
     return false;

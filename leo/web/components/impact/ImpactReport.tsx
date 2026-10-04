@@ -20,10 +20,10 @@ type Result = {
   operator: {
     capex: Dict; capex_total: number; revenue: Dict; revenue_total: number; payouts: number; opex: Dict;
     opex_total: number; net_cash_per_year: number; npv: number; payback_years: number | null; alpha: number;
-    break_even_rate_rs_per_kw_year: number | null; max_battery_price_at_discom_max_rate?: number | null;
+    break_even_rate_rs_per_kwh: number | null; max_battery_price_at_discom_max_rate?: number | null;
     grant_pct_needed_at_discom_max_rate?: number | null; npv_at_discom_max_rate?: number;
   };
-  discom: Dict & { net: number; max_rate_rs_per_kw_year: number | null; npv: number };
+  discom: Dict & { net: number; max_rate_rs_per_kwh: number | null; npv: number; gross_saving: number };
   households: Dict;
   reliability: Record<string, number | null>;
   system_npv: number;
@@ -54,7 +54,9 @@ const num = (x: number | null | undefined, digits = 0) =>
 const pctChange = (from: number, to: number) => (from ? ((to - from) / from) * 100 : 0);
 
 const LABELS: Record<string, string> = {
-  dfpo_flexibility: "DFPO flexibility payments", energy_settlement: "Energy settlement (ToD)", backup_fees: "Backup fees",
+  dfpo_capacity: "DFPO capacity (₹2,000/kW-yr)", evening_energy: "Evening-energy payment",
+  paid_to_operator_capacity: "Paid to operator: capacity", paid_to_operator_energy: "Paid to operator: evening energy",
+  smart_relays_controllers: "Smart pump relays + AC controllers", energy_settlement: "Energy settlement (ToD)", backup_fees: "Backup fees",
   battery_packs: "Second-life battery packs", inverters: "Hybrid inverters", backup_circuit: "Backup circuit + meters",
   sensors_and_gateways: "Sensors, CTs, gateways", installation: "Installation", registration_setup: "Aggregator registration (share)",
   technician: "Technician (share)", cloud_connectivity: "Cloud + data", sms: "SMS / IVR", insurance: "Insurance",
@@ -164,8 +166,8 @@ const THRESHOLD_TEXT: Record<string, [string, string, (A: Impact["assumptions"])
 };
 
 function DealZone({ r, data }: { r: Result; data: Impact }) {
-  const lo = r.operator.break_even_rate_rs_per_kw_year;
-  const hi = r.discom.max_rate_rs_per_kw_year;
+  const lo = r.operator.break_even_rate_rs_per_kwh;
+  const hi = r.discom.max_rate_rs_per_kwh;
   if (lo == null || hi == null) return null;
   const scale = Math.max(lo, hi) * 1.25;
   const pos = (v: number) => `${(v / scale) * 100}%`;
@@ -173,12 +175,13 @@ function DealZone({ r, data }: { r: Result; data: Impact }) {
   const thresholds = Object.entries(r.system_thresholds ?? {}).filter(([k, v]) => v != null && THRESHOLD_TEXT[k]);
   return (
     <section className="rounded-lg border border-[var(--leo-border)] bg-[var(--leo-panel)] p-4">
-      <h3 className="text-sm font-semibold">Is there a deal? The DFPO rate both sides can live with</h3>
+      <h3 className="text-sm font-semibold">Is there a deal? The contract both sides can live with</h3>
       <p className="text-xs text-[var(--leo-text-dim)] mb-4">
-        DFPO is measured in kW at the peak instant (MERC 2024: ₹2,000/kW-yr shortfall penalty, KERC 2026 follows).
-        This DT delivers {num(r.physical.verified_peak_kw, 1)} kW of verified peak reduction. The operator needs at least
-        its break-even rate per kW-year to recover its capital over 10 years; the DISCOM gains from every kW, so it
-        should pay up to the rate where its own benefit hits zero.
+        Two-part contract. Capacity: DFPO is measured in kW at the peak instant, paid at the MERC benchmark of
+        ₹2,000/kW-yr ({num(r.physical.verified_peak_kw, 1)} kW verified here). Energy: a payment per verified kWh of evening
+        reduction ({num(r.physical.flex_kwh)} kWh/yr from the battery and demand response) — most of the DISCOM&apos;s gain is
+        evening power it no longer buys at ₹10/kWh, so it can share it. The operator needs at least its break-even energy
+        rate to recover its capital over 10 years; the DISCOM should pay up to the rate where its own benefit hits zero.
         Payments between them cancel out, so a deal exists exactly when their combined value is positive
         (now {rs(r.system_npv)} over 10 years).
       </p>
@@ -193,23 +196,21 @@ function DealZone({ r, data }: { r: Result; data: Impact }) {
       </div>
       <div className="relative h-10 text-xs">
         <span className={`absolute text-[var(--leo-warn)] ${lo <= hi ? "-translate-x-full text-right pr-1" : "pl-1"}`} style={{ left: pos(lo) }}>
-          operator needs<br />≥ ₹{num(lo)}/kW-yr
+          operator needs<br />≥ ₹{num(lo, 2)}/kWh
         </span>
         <span className={`absolute text-[var(--leo-accent)] ${lo <= hi ? "pl-1" : "-translate-x-full text-right pr-1"}`} style={{ left: pos(hi) }}>
-          DISCOM can pay<br />≤ ₹{num(hi)}/kW-yr
+          DISCOM can pay<br />≤ ₹{num(hi, 2)}/kWh
         </span>
       </div>
       {overlap ? (
         <p className="text-sm mt-2 text-[var(--leo-ok)]">
-          A deal exists: any DFPO rate between ₹{num(lo)} and ₹{num(hi)} per kW-year leaves both sides better off
-          (contract assumed here: ₹{num(data.assumptions.dfpo?.payment_rs_per_kw_year)}). That is a two-part contract:
-          the ₹2,000/kW-yr MERC DFPO benchmark plus a payment for verified evening discharge — most of the DISCOM&apos;s
-          gain is not the penalty but evening power it no longer buys at ₹10/kWh, so it can afford to share it.
+          A deal exists: ₹2,000/kW-yr capacity plus any evening-energy rate between ₹{num(lo, 2)} and ₹{num(hi, 2)}/kWh leaves
+          both sides better off (contract assumed here: ₹{num(data.assumptions.dfpo?.evening_energy_rs_per_kwh, 2)}/kWh).
         </p>
       ) : (
         <div className="mt-2 text-sm">
           <p>
-            No rate works at these prices: the gap is ₹{num(lo - hi)}/kW-yr. It closes if{" "}
+            No rate works at these prices: the gap is ₹{num(lo - hi, 2)}/kWh. It closes if{" "}
             <b>any one</b> of these turns out true:
           </p>
           <table className="text-xs mt-2">
@@ -333,7 +334,7 @@ export default function ImpactReport() {
           />
           <Kpi
             title="Transformer life at this loading"
-            base={`${num(rel.dt_life_years_base, 1)}`} leo={`${num(rel.dt_life_years, 1)}`} unit="years"
+            base={`${num(rel.dt_life_years_base, 1)}`} leo={(rel.dt_life_years ?? 0) > 100 ? "100+" : `${num(rel.dt_life_years, 1)}`} unit="years"
             better={rel.dt_failure_customer_hours_avoided ? `${num(rel.dt_failure_customer_hours_avoided)} customer-hours/yr of failure outages avoided` : null}
             note={`Expected failure rate ${num(rel.dt_failure_rate_pct_base, 1)}% → ${num(rel.dt_failure_rate_pct, 1)}% a year. BESCOM lost 7.96% of its DTs in FY 2023-24, 29% of them to overload; a 100 kVA unit costs ₹5.05 L to replace. Ageing doubles every ~6 °C of hot-spot temperature (IEEE C57.91), so shaving the evening peak buys back years.`}
           />
@@ -413,14 +414,24 @@ export default function ImpactReport() {
                 priced hour by hour, so battery round-trip losses and DR rebound are already netted out.
               </p>
             </div>
+            <dl className="grid grid-cols-2 gap-3 text-center">
+              <div><dt className="text-xs text-[var(--leo-text-dim)]">Gross saving, this DT</dt>
+                <dd className="text-xl font-semibold text-[var(--leo-ok)]">{rs(r.discom.gross_saving)}<span className="text-xs font-normal">/yr</span></dd></div>
+              <div><dt className="text-xs text-[var(--leo-text-dim)]">Per 1,000 overloaded DTs</dt>
+                <dd className="text-xl font-semibold">{rs(r.discom.gross_saving * 1000)}<span className="text-xs font-normal">/yr</span></dd></div>
+              <div><dt className="text-xs text-[var(--leo-text-dim)]">Technical losses saved</dt>
+                <dd className="text-xl font-semibold">{num((rel.loss_kwh_base ?? 0) - (rel.loss_kwh ?? 0))}<span className="text-xs font-normal"> kWh/yr</span></dd>
+                <dd className="text-[10px] text-[var(--leo-text-dim)]">{num(100 * (1 - (rel.loss_kwh ?? 0) / (rel.loss_kwh_base || 1)), 1)}% of this DT&apos;s I²R + transformer losses</dd></div>
+              <div><dt className="text-xs text-[var(--leo-text-dim)]">Evening power not bought</dt>
+                <dd className="text-xl font-semibold">{num(r.physical.flex_kwh / 1000, 1)}<span className="text-xs font-normal"> MWh/yr</span></dd>
+                <dd className="text-[10px] text-[var(--leo-text-dim)]">at ₹10/kWh, refilled at ₹1.91 midday</dd></div>
+            </dl>
             <Ledger title="Each year, vs no LEO"
-              lines={Object.entries(r.discom).filter(([k]) => !["net", "max_rate_rs_per_kw_year", "npv"].includes(k)) as [string, number][]}
-              total={r.discom.net} totalLabel="Net benefit" tone={r.discom.net > 0 ? "ok" : "bad"} />
+              lines={Object.entries(r.discom).filter(([k]) => !["net", "max_rate_rs_per_kwh", "npv", "gross_saving"].includes(k)) as [string, number][]}
+              total={r.discom.net} totalLabel="Net, after paying the operator" tone={r.discom.net > 0 ? "ok" : "bad"} />
             <p className="text-xs text-[var(--leo-text-dim)]">
-              {num(r.physical.verified_peak_kw, 1)} kW verified peak reduction (DFPO), from{" "}
-              {num(r.physical.battery_discharge_kwh)} kWh/yr of battery discharge and{" "}
-              {num(r.physical.dr_verified_kwh)} kWh/yr from {num(r.physical.dr_accepted)} accepted DR offers on the year&apos;s
-              stress days (after holdout verification).
+              The net is what is left after the contract hands most of the saving to the operator, who funds the
+              batteries, devices and household payments with it — the split is set inside the deal zone below.
             </p>
           </div>
 
@@ -439,22 +450,19 @@ export default function ImpactReport() {
               <div><dt className="text-xs text-[var(--leo-text-dim)]">Own home inverter instead</dt><dd className="text-xl font-semibold">₹15,000+<span className="text-xs font-normal"> per kWh</span></dd></div>
             </dl>
             <div className="text-xs">
-              <p className="text-[var(--leo-text-dim)] mb-1">
-                DR offers per year ({num(r.physical.dr_events)} events, only on the most stressed days — DFPO pays for the
-                peak instant, so offers are rare and worth real money):
-              </p>
-              <div className="flex gap-2">
-                {["0", "25", "50", "100"].map((k) => (
-                  <div key={k} className="flex-1 rounded border border-[var(--leo-border)] p-1.5 text-center">
-                    <p className="font-semibold">{num(r.physical.dr_offered_rs?.[k] ?? 0)}</p>
-                    <p className="text-[10px] text-[var(--leo-text-dim)]">{k === "0" ? "appeal only" : `₹${k} offers`}</p>
-                  </div>
-                ))}
-              </div>
-              <p className="text-[var(--leo-text-dim)] mt-1">
-                Paid to households for DR: {rs(r.physical.dr_incentive_rs)}/yr. The bandit pays ₹50–100 where a household&apos;s
-                cut is worth it (closed shops, AC/cooler homes) and asks the rest for free.
-              </p>
+              <p className="text-[var(--leo-text-dim)] mb-1">Demand response paid to households: {rs(r.physical.dr_paid_rs)}/yr</p>
+              <table className="w-full">
+                <tbody>
+                  {(r.physical.smart_pumps ?? 0) > 0 && (
+                    <tr className="border-t border-[var(--leo-border)]/50"><td className="py-1">Pump shifting (automated, daily)</td>
+                      <td className="text-right">{num(r.physical.smart_pumps)} homes · ₹{num(data.assumptions.smart_dr?.pump_fee_rs_per_month)}/month</td></tr>)}
+                  {(r.physical.smart_acs ?? 0) > 0 && (
+                    <tr className="border-t border-[var(--leo-border)]/50"><td className="py-1">AC events (automated)</td>
+                      <td className="text-right">{num(r.physical.ac_events)} events · {num(r.physical.ac_participations)} home-events · ₹75 each</td></tr>)}
+                  <tr className="border-t border-[var(--leo-border)]/50"><td className="py-1">SMS offers (₹0 / 25 / 50 / 100)</td>
+                    <td className="text-right">{["0", "25", "50", "100"].map((k) => num(r.physical.dr_offered_rs?.[k] ?? 0)).join(" / ")}</td></tr>
+                </tbody>
+              </table>
             </div>
             <p className="text-xs text-[var(--leo-text-dim)]">
               Operator cost per household: {rs(o.capex_total / 10 / 150 / 12 + o.opex_total / 150 / 12)}/month, recovered from

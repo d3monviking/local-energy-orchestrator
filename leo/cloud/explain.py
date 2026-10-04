@@ -414,6 +414,26 @@ async def action_log(conn, run_id: str) -> list[dict]:
         if k == "load_shedding_notice":
             add(e["ts"], "DISCOM", k, f"DISCOM published a load-shedding schedule: {_fmt(datetime.fromisoformat(p['scheduled_start']))}–{_fmt(datetime.fromisoformat(p['scheduled_end']))} IST",
                 p.get("reason", ""), "Load shedding is announced, so LEO can prepare — unlike a fault", severity="warn")
+        elif k == "dr_auto_shift":
+            homes = p.get("pump_homes", [])
+            slot = p.get("pump_slot_ist", 11.0)
+            hh_, mm_ = int(slot), int(round(slot % 1 * 60))
+            add(e["ts"], "DR engine", "dr_auto_shift",
+                f"Automated load shift: {len(homes)} smart-relay pumps moved from 18:00 to {hh_:02d}:{mm_:02d} IST",
+                f"{p.get('pump_kwh', 0):.1f} kWh moved out of the evening ramp into the midday solar surplus "
+                f"({len(homes) * 0.75:.1f} kW off the 18:00–19:00 load). Households can override from the app.",
+                "Pumping is flexible in time; running it at midday uses the neighbourhood's own solar instead of evening "
+                "power the DISCOM buys at ₹10/kWh. Paid as a flat monthly fee per enrolled pump.",
+                link="/operator/dr", meta={"n_homes": len(homes)})
+        elif k == "dr_auto_ac":
+            homes = p.get("ac_homes", [])
+            add(e["ts"], "DR engine", "dr_auto_ac",
+                f"Automated AC event: {len(homes)} smart-controlled ACs cycled to 40% for 2 h",
+                f"{p.get('ac_kw', 0):.1f} kW off the evening peak ({p.get('ac_kwh', 0):.1f} kWh); pre-cooled in the 2 h before. "
+                f"₹{p.get('ac_payment_rs', 0):.0f} per home that takes part.",
+                "DFPO pays for kW at the peak instant; an automated AC cut is large (~0.6 kW a home) and reliable, "
+                "unlike an SMS request, which is why it can be paid ₹50–100 per event",
+                link="/operator/dr", severity="live", end=e["ts"] + timedelta(hours=2), meta={"n_homes": len(homes)})
         elif k == "alert_sent":
             add(e["ts"], "LEO", k, f"SMS alert sent to {p.get('n_households')} households", f"“{p.get('message')}”",
                 "So households charge phones and home inverters before the cut")

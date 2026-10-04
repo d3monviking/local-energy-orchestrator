@@ -34,12 +34,12 @@ LEVEL_SCALE = 100.0                 # feature value = rupees / 100, keeps x at O
 # DFPO pays for kW at the peak instant (MERC 2024: Rs 2,000/kW-yr shortfall
 # penalty / incentive; KERC 2026 follows MERC). Peak days aren't known
 # exactly in advance, so the kW has to be delivered on each called event:
-# DR is called only on the ~2% most stressed days, ~8 events/yr -> Rs 250
-# per kW per event. (The annual budget per kW is fixed at Rs 2,000, so the
+# DR is called on the ~5% most stressed days (a DFPO peak season), ~20
+# events/yr -> Rs 100 per kW per event. (The annual budget per kW is fixed at Rs 2,000, so the
 # per-event offer a household can be paid is that divided by the event
 # count: ~15 events would only support Rs 25-40 offers; ~8 supports 50-100.) Plus the energy itself at the
 # IEX evening premium (Rs 7.92/kWh, research note).
-CAPACITY_RS_PER_KW_EVENT = 2000.0 / 8
+CAPACITY_RS_PER_KW_EVENT = 2000.0 / 20
 ENERGY_RS_PER_KWH = 7.92
 ACCEPTED_REDUCTION_FRAC = 0.3       # typical cut once a household accepts (sim/personas.py means 0.2-0.35)
 

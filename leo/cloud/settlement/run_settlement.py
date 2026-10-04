@@ -32,10 +32,62 @@ from cloud.settlement.streams import stream1_absorption_payments, stream2_discha
 from cloud.settlement.budget import compute_payout_budget, scale_claims_to_budget
 from cloud.settlement.ledger import LedgerWriter, write_ledger_rows
 
-FEED_IN_TARIFF_PAISE_PER_KWH = 250
-TOD_RATE_PAISE_PER_KWH = 700
-BACKUP_FEE_PAISE_PER_KWH = 700  # (verify) member-agreed rate; same as ToD retail as a stand-in
-ALPHA = 0.6
+# Prices and contract terms come from economics.yaml, the same file the
+# unit economics use, so the demo ledger and the Impact page agree.
+import yaml
+from pathlib import Path
+_ECON = yaml.safe_load(open(Path(__file__).resolve().parents[2] / "economics.yaml"))
+FEED_IN_TARIFF_PAISE_PER_KWH = round(_ECON["tariffs"]["feed_in_tariff_rs_per_kwh"] * 100)
+TOD_RATE_PAISE_PER_KWH = round(_ECON["tariffs"]["retail_rs_per_kwh"] * 100)
+BACKUP_FEE_PAISE_PER_KWH = round(_ECON["backup"]["fee_rs_per_kwh"] * 100)
+ALPHA = _ECON["operator"]["alpha"]
+CAPACITY_RS_PER_KW_YEAR = _ECON["dfpo"]["payment_rs_per_kw_year"]
+EVENING_ENERGY_RS_PER_KWH = _ECON["dfpo"]["evening_energy_rs_per_kwh"]
+PUMP_FEE_RS_PER_MONTH = _ECON["smart_dr"]["pump_fee_rs_per_month"]
+
+
+def _evening_peak_kva(conn, run_id: str) -> float:
+    """Transformer evening peak (16:30-23:30 IST) in kVA from the busbar rows."""
+    cur = conn.cursor()
+    cur.execute(
+        """SELECT max(s) FROM (
+             SELECT ts_end, sum(loading_pct) / 100.0 * (SELECT transformer_kva FROM neighbourhood LIMIT 1) / 3 AS s
+             FROM network_result
+             WHERE run_id = %s AND NOT is_forecast AND loading_pct IS NOT NULL AND loading_pct = loading_pct
+               AND bus_id = (SELECT bus_id FROM network_result WHERE run_id = %s AND NOT is_forecast
+                             GROUP BY bus_id ORDER BY max(loading_pct) DESC NULLS LAST LIMIT 1)
+               AND ((extract(hour FROM ts_end) * 60 + extract(minute FROM ts_end) + 330) %% 1440) BETWEEN 990 AND 1410
+             GROUP BY ts_end) t""", (run_id, run_id))
+    v = cur.fetchone()[0]
+    cur.close()
+    return float(v or 0.0)
+
+
+def settle_automated_dr(conn, run_id: str, plan_date: date_cls) -> tuple[pd.DataFrame, int, float]:
+    """Contractual payments for automated DR: the flat AC-event payment to
+    each home that took part, and the daily share of the monthly pump fee.
+    Returns (ledger rows, paise, evening kWh moved/cut)."""
+    cur = conn.cursor()
+    cur.execute("SELECT kind::text, payload FROM event WHERE run_id = %s AND kind IN ('dr_auto_shift','dr_auto_ac')", (run_id,))
+    rows, kwh = [], 0.0
+    for kind, payload in cur.fetchall():
+        if kind == "dr_auto_ac":
+            kwh += float(payload.get("ac_kwh", 0.0))
+            for hid in payload.get("ac_homes", []):
+                rows.append({"household_id": hid, "date": plan_date, "entry_type": "dr_incentive", "deficit_kwh": None,
+                             "matched_kwh": None, "amount_paise": int(round(payload["ac_payment_rs"] * 100)),
+                             "linked_event_id": "AUTO-AC", "rank_snapshot": None,
+                             "period_budget_paise": 0, "payout_scaling_factor": 1.0})
+        else:
+            kwh += float(payload.get("pump_kwh", 0.0))
+            for hid in payload.get("pump_homes", []):
+                rows.append({"household_id": hid, "date": plan_date, "entry_type": "dr_incentive", "deficit_kwh": None,
+                             "matched_kwh": 0.75, "amount_paise": int(round(PUMP_FEE_RS_PER_MONTH * 100 / 30)),
+                             "linked_event_id": "AUTO-PUMP", "rank_snapshot": None,
+                             "period_budget_paise": 0, "payout_scaling_factor": 1.0})
+    cur.close()
+    df = pd.DataFrame(rows)
+    return df, int(df["amount_paise"].sum()) if len(df) else 0, kwh
 
 
 def db_connect():
@@ -109,6 +161,12 @@ def settle_dr_incentives(conn, run_id: str, plan_date: date_cls) -> tuple[pd.Dat
 def settle_normal_day(conn, plan_date: date_cls, feeder_phase_by_hhid: dict[str, str]) -> dict:
     run_id = "normal"
     incentives_df, dr_incentives_paise = settle_dr_incentives(conn, run_id, plan_date)
+    auto_df, auto_paise, auto_kwh = settle_automated_dr(conn, run_id, plan_date)
+    print(f"automated DR: {len(auto_df)} payments, {auto_paise} paise, {auto_kwh:.1f} kWh moved/cut")
+    sms_verified_kwh = float(incentives_df["matched_kwh"].sum()) if len(incentives_df) else 0.0
+    if len(auto_df):
+        incentives_df = pd.concat([incentives_df, auto_df], ignore_index=True)
+        dr_incentives_paise += auto_paise
     print(f"DR incentives: {len(incentives_df)} households, {dr_incentives_paise} paise")
 
     export_df = _load_export_df(conn, run_id, feeder_phase_by_hhid)
@@ -142,8 +200,16 @@ def settle_normal_day(conn, plan_date: date_cls, feeder_phase_by_hhid: dict[str,
     # battery's own delivered flexibility is the primary, always-present
     # revenue basis; DR verified kWh adds to it rather than being the
     # only source of it.
-    verified_kwh_total = float(incentives_df["matched_kwh"].sum()) if len(incentives_df) else 0.0
-    dfpo_paise = round((discharge_only_kwh + verified_kwh_total) * 600)  # 600 paise/kWh = Rs 6, matches sim.loop.V_RUPEES_PER_KWH
+    # Two-part contract (economics.yaml): capacity for the verified evening
+    # peak cut vs the no-LEO baseline (one day's share of the annual rate),
+    # plus the evening-energy payment for battery discharge and DR.
+    peak_cut_kw = max(0.0, _evening_peak_kva(conn, "baseline") - _evening_peak_kva(conn, run_id)) * 0.95
+    evening_kwh = discharge_only_kwh + sms_verified_kwh + auto_kwh
+    capacity_paise = round(peak_cut_kw * CAPACITY_RS_PER_KW_YEAR / 365 * 100)
+    energy_paise = round(evening_kwh * EVENING_ENERGY_RS_PER_KWH * 100)
+    dfpo_paise = capacity_paise + energy_paise
+    print(f"contract: {peak_cut_kw:.1f} kW peak cut -> capacity {capacity_paise}p, "
+          f"{evening_kwh:.1f} evening kWh -> energy {energy_paise}p")
     monthly_revenue_paise = dfpo_paise  # single-day proxy; see module docstring
     budget_paise = compute_payout_budget(monthly_revenue_paise, alpha=ALPHA)
 

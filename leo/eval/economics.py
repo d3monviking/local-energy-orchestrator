@@ -65,8 +65,10 @@ def annual_physical(sweep: dict) -> dict[str, dict]:
                   "trips", "trip_cust_min", "outage_cust_min", "shed_cust_min", "crit_out_min", "crit_served_min",
                   "backup_kwh", "absorbed_export_kwh", "export_kwh", "energy_served_kwh"):
             a[k] = a.get(k, 0.0) + m[k] * scale
-        for k in ("offers", "accepted", "verified_kwh", "incentive_rs", "rebound_kwh", "events"):
-            a["dr_" + k] = a.get("dr_" + k, 0.0) + m["dr"][k] * scale
+        for k in ("offers", "accepted", "verified_kwh", "incentive_rs", "rebound_kwh", "events",
+                  "pump_shift_kwh", "ac_curtail_kwh", "ac_paid_rs", "precool_kwh", "ac_rebound_kwh", "ac_events",
+                  "ac_participants"):
+            a["dr_" + k] = a.get("dr_" + k, 0.0) + m["dr"].get(k, 0.0) * scale
     for a in out.values():
         pl, ep = a.pop("peak_loading"), a.pop("evening_peak_kw")
         a["peak_loading_mean"], a["peak_loading_max"] = float(np.mean(pl)), float(np.max(pl))
@@ -79,10 +81,14 @@ def _hours(lo_hi: list[int]) -> np.ndarray:
     return np.array([lo <= h < hi for h in range(24)])
 
 
-def capex_breakdown(cfg: dict, n_backup: int, A: dict) -> dict:
+def capex_breakdown(cfg: dict, n_backup: int, A: dict, n_smart: tuple = (0, 0)) -> dict:
     """Capital per DT. Cluster-shared items are divided by the cluster size."""
     c, om = A["capex"], A["operating_model"]
     items = {"sensors_and_gateways": c["sensors_concentrator_rs"] + 3 * c["busbar_ct_rs"] + c["edge_gateway_rs"]}
+    if cfg.get("smart"):
+        sdc = A.get("smart_dr", {})
+        items["smart_relays_controllers"] = (n_smart[0] * sdc.get("pump_relay_rs", 0)
+                                             + n_smart[1] * sdc.get("ac_controller_rs", 0))
     if cfg["battery"]:
         cap_kwh, power_kw = cfg["battery"]
         items["battery_packs"] = 3 * cap_kwh * c["battery_rs_per_kwh"]
@@ -95,9 +101,10 @@ def capex_breakdown(cfg: dict, n_backup: int, A: dict) -> dict:
 
 
 def evaluate(cfg_name: str, cfg: dict, phys: dict, base: dict, A: dict, n_backup: int,
-             dfpo_payment: float | None = None, alpha: float | None = None) -> dict:
+             energy_rate: float | None = None, alpha: float | None = None) -> dict:
     t, d, o, b = A["tariffs"], A["discom"], A["opex"], A["battery"]
-    pay = A["dfpo"]["payment_rs_per_kw_year"] if dfpo_payment is None else dfpo_payment
+    pay = A["dfpo"]["payment_rs_per_kw_year"]
+    e_rate = A["dfpo"]["evening_energy_rs_per_kwh"] if energy_rate is None else energy_rate
     alpha = A["operator"]["alpha"] if alpha is None else alpha
     hh_n = A["neighbourhood"]["households"]
     peak, solar = _hours(t["peak_hours_ist"]), _hours(t["solar_hours_ist"])
@@ -111,17 +118,26 @@ def evaluate(cfg_name: str, cfg: dict, phys: dict, base: dict, A: dict, n_backup
 
     discharge_kwh = float(phys["discharge_h"].sum())
     charge_kwh = float(phys["charge_h"].sum())
-    flex_kwh = float(phys["discharge_h"][evening].sum()) + phys["dr_verified_kwh"]
+    # Verified evening reduction the energy part of the contract pays for:
+    # battery evening discharge + SMS DR + AC events (net of pre-cooling
+    # and rebound) + pump load moved out of the evening.
+    dr_evening_kwh = (phys["dr_verified_kwh"] - phys["dr_rebound_kwh"] + phys["dr_ac_curtail_kwh"]
+                      - phys["dr_precool_kwh"] - phys["dr_ac_rebound_kwh"] + phys["dr_pump_shift_kwh"])
+    flex_kwh = float(phys["discharge_h"][evening].sum()) + max(0.0, dr_evening_kwh)
+    sdc = A.get("smart_dr", {})
+    n_pumps, n_acs = (phys.get("smart_pumps", 0), phys.get("smart_acs", 0)) if cfg.get("smart") else (0, 0)
+    dr_paid = phys["dr_incentive_rs"] + phys["dr_ac_paid_rs"] + n_pumps * 12 * sdc.get("pump_fee_rs_per_month", 0)
 
     # ---- Operator
-    capex = capex_breakdown(cfg, n_backup, A)
+    capex = capex_breakdown(cfg, n_backup, A, (n_pumps, n_acs))
     capex_total = sum(capex.values())
     battery_capex = capex.get("battery_packs", 0.0)
     # DFPO is capacity: verified kW cut at the peak instance (run() measures
     # it on the most stressed days), paid per kW-year.
     verified_kw = phys["verified_peak_kw"]
     revenue = {
-        "dfpo_flexibility": verified_kw * pay,
+        "dfpo_capacity": verified_kw * pay,
+        "evening_energy": flex_kwh * e_rate,
         "energy_settlement": float(phys["discharge_h"] @ retail_h - phys["charge_h"] @ retail_h),
         "backup_fees": (phys["backup_kwh"] * A["backup"]["fee_rs_per_kwh"]
                         + (n_backup * 12 * A["backup"]["subscription_rs_per_premise_month"] if cfg["battery"] else 0.0)),
@@ -129,9 +145,11 @@ def evaluate(cfg_name: str, cfg: dict, phys: dict, base: dict, A: dict, n_backup
     revenue_total = sum(revenue.values())
     stream1 = phys["absorbed_export_kwh"] * (t["feed_in_tariff_rs_per_kwh"] + t["retail_rs_per_kwh"]) / 2.0
     stream2 = discharge_kwh * t["retail_rs_per_kwh"]
-    claims = phys["dr_incentive_rs"] + stream1 + stream2
+    # DR payments are contractual and paid first; alpha x revenue caps the
+    # total, and Streams 1-2 share whatever the DR payments leave of it.
+    claims = dr_paid + stream1 + stream2
     budget = max(0.0, alpha * revenue_total)
-    payouts = max(phys["dr_incentive_rs"], min(claims, budget))
+    payouts = max(dr_paid, min(claims, budget))
     n_dt = A["operating_model"]["dts_per_operator"]
     opex = {
         "technician": 12 * o["technician_rs_per_month"] / n_dt,
@@ -164,7 +182,8 @@ def evaluate(cfg_name: str, cfg: dict, phys: dict, base: dict, A: dict, n_backup
 
     # ---- DISCOM (vs baseline)
     d_purchase = float((phys["import_h"] - base["import_h"]) @ purchase_h)          # + = costs more
-    dr_net_kwh = phys["dr_verified_kwh"] - phys["dr_rebound_kwh"]
+    dr_net_kwh = (phys["dr_verified_kwh"] - phys["dr_rebound_kwh"] + phys["dr_ac_curtail_kwh"]
+                  - phys["dr_precool_kwh"] - phys["dr_ac_rebound_kwh"])  # pump shifts move energy, don't remove it
     failures_base = base["aging_hours"] / d["dt_normal_life_hours"]
     failures = phys["aging_hours"] / d["dt_normal_life_hours"]
     # Transformer: deferral of augmentation if LEO keeps the average evening
@@ -186,13 +205,14 @@ def evaluate(cfg_name: str, cfg: dict, phys: dict, base: dict, A: dict, n_backup
         "power_purchase_saved": -d_purchase,
         "dfpo_penalty_avoided": verified_kw * A["dfpo"]["penalty_rs_per_kw_year"],
         **dt_line,
-        "paid_to_operator_dfpo": -revenue["dfpo_flexibility"],
+        "paid_to_operator_capacity": -revenue["dfpo_capacity"],
+        "paid_to_operator_energy": -revenue["evening_energy"],
         "energy_settlement_with_operator": -revenue["energy_settlement"],
         "retail_revenue_lost_to_dr": -dr_net_kwh * t["retail_rs_per_kwh"],
     }
     discom_net = sum(discom.values())
     # Highest DFPO rate at which the DISCOM still comes out ahead.
-    discom_max_rate = pay + discom_net / verified_kw if verified_kw > 0 else None
+    discom_max_rate = e_rate + discom_net / flex_kwh if flex_kwh > 0 else None
 
     # ---- Households and reliability
     avg_load_kw = base["energy_served_kwh"] / 8760.0
@@ -222,7 +242,7 @@ def evaluate(cfg_name: str, cfg: dict, phys: dict, base: dict, A: dict, n_backup
     households = {
         "payouts_total_rs": payouts,
         "payout_per_household_rs": payouts / hh_n,
-        "dr_incentives_rs": phys["dr_incentive_rs"],
+        "dr_incentives_rs": dr_paid,
         "dr_avg_payment_per_paid_accept_rs": None,
         "backup_fees_paid_rs": revenue["backup_fees"],
         "upfront_cost_rs": 0.0,
@@ -230,7 +250,11 @@ def evaluate(cfg_name: str, cfg: dict, phys: dict, base: dict, A: dict, n_backup
 
     return {
         "config": cfg_name, "label": cfg["label"],
-        "physical": {"flex_kwh": flex_kwh, "verified_peak_kw": verified_kw,
+        "physical": {"flex_kwh": flex_kwh, "verified_peak_kw": verified_kw, "dr_evening_kwh": dr_evening_kwh,
+                     "pump_shift_kwh": phys["dr_pump_shift_kwh"], "ac_curtail_kwh": phys["dr_ac_curtail_kwh"],
+                     "ac_events": phys["dr_ac_events"], "ac_paid_rs": phys["dr_ac_paid_rs"],
+                     "ac_participations": phys["dr_ac_participants"], "smart_pumps": n_pumps, "smart_acs": n_acs,
+                     "dr_paid_rs": dr_paid,
                      "dr_offered_rs": phys["dr_offered_rs"], "dr_incentive_rs": phys["dr_incentive_rs"], "battery_discharge_kwh": discharge_kwh, "battery_charge_kwh": charge_kwh,
                      "dr_verified_kwh": phys["dr_verified_kwh"], "dr_rebound_kwh": phys["dr_rebound_kwh"],
                      "dr_offers": phys["dr_offers"], "dr_accepted": phys["dr_accepted"], "dr_events": phys["dr_events"],
@@ -239,7 +263,8 @@ def evaluate(cfg_name: str, cfg: dict, phys: dict, base: dict, A: dict, n_backup
                      "claims": claims, "budget": budget, "payouts": payouts, "opex": opex, "opex_total": opex_total,
                      "net_cash_per_year": net_cash, "npv": npv, "payback_years": payback, "alpha": alpha,
                      "cost_per_household_month": (capex_total / A["finance"]["horizon_years"] + opex_total) / hh_n / 12},
-        "discom": {**discom, "net": discom_net, "max_rate_rs_per_kw_year": discom_max_rate,
+        "discom": {**discom, "net": discom_net, "max_rate_rs_per_kwh": discom_max_rate,
+                   "gross_saving": sum(v for k, v in discom.items() if not k.startswith("paid_to") and v > 0),
                    "npv": discom_net / crf},
         # Payments between operator and DISCOM cancel here: if this is
         # negative, no DFPO rate can make both sides whole.
@@ -264,6 +289,10 @@ def run(sweep_id: str) -> dict:
     phys = annual_physical(sweep)
     configs = sweep["params"]["configs"]
     n_backup = len(sweep["params"]["backup_premises"])
+    from eval.sweep import smart_enrolment
+    n_pumps, n_acs = smart_enrolment()
+    for name in phys:
+        phys[name]["smart_pumps"], phys[name]["smart_acs"] = n_pumps, n_acs
     base = phys["baseline"]
     # Verified kW: the cut in the DT's evening peak on the most stressed
     # days of the year (top share of sampled days by baseline peak) - the
@@ -279,22 +308,22 @@ def run(sweep_id: str) -> dict:
             continue
         res = evaluate(name, cfg, phys[name], base, A, n_backup)
         # Lowest DFPO rate at which the operator's 10-year NPV is >= 0.
-        res["operator"]["break_even_rate_rs_per_kw_year"] = _solve(
-            lambda x: evaluate(name, cfg, phys[name], base, A, n_backup, dfpo_payment=x)["operator"]["npv"], 0.0, 200000.0)
+        res["operator"]["break_even_rate_rs_per_kwh"] = _solve(
+            lambda x: evaluate(name, cfg, phys[name], base, A, n_backup, energy_rate=x)["operator"]["npv"], 0.0, 100.0)
         # Highest household share that still pays back within the target.
         # The deal zone: paid the most the DISCOM can afford, what battery
         # price / capital grant makes the operator whole over 10 years?
-        dmax = res["discom"]["max_rate_rs_per_kw_year"]
+        dmax = res["discom"]["max_rate_rs_per_kwh"]
         if cfg["battery"] and dmax:
             def at(sec, key, val):
                 A2 = json.loads(json.dumps(A)); A2[sec][key] = val
-                return evaluate(name, cfg, phys[name], base, A2, n_backup, dfpo_payment=dmax)["operator"]["npv"]
+                return evaluate(name, cfg, phys[name], base, A2, n_backup, energy_rate=dmax)["operator"]["npv"]
             res["operator"]["max_battery_price_at_discom_max_rate"] = _solve(
                 lambda x: -at("capex", "battery_rs_per_kwh", x), 0.0, 50000.0)
             res["operator"]["grant_pct_needed_at_discom_max_rate"] = _solve(
                 lambda g: at("finance", "capital_grant_pct", g), 0.0, 100.0)
             res["operator"]["npv_at_discom_max_rate"] = evaluate(name, cfg, phys[name], base, A, n_backup,
-                                                                 dfpo_payment=dmax)["operator"]["npv"]
+                                                                 energy_rate=dmax)["operator"]["npv"]
         # Household share alpha is a transfer: every rupee of DFPO revenue
         # sends alpha to households, raising the rate the operator needs.
         # The highest alpha at which the operator still breaks even when
@@ -302,7 +331,7 @@ def run(sweep_id: str) -> dict:
         # deal exists.
         if dmax:
             res["operator"]["max_alpha_for_deal"] = _solve(
-                lambda a: -evaluate(name, cfg, phys[name], base, A, n_backup, dfpo_payment=dmax,
+                lambda a: -evaluate(name, cfg, phys[name], base, A, n_backup, energy_rate=dmax,
                                     alpha=a)["operator"]["npv"], 0.0, 0.95)
         # What each uncertain price must be for the whole arrangement to be
         # worth doing (system NPV = 0), one at a time - the targets the
@@ -345,8 +374,8 @@ def run(sweep_id: str) -> dict:
 
 def sensitivity(name, cfg, phys, base, A, n_backup) -> list[dict]:
     sens = []
-    for label, kw in [("DFPO rate -30%", {"dfpo": {"payment_rs_per_kw_year": 0.7}}),
-                      ("DFPO rate +30%", {"dfpo": {"payment_rs_per_kw_year": 1.3}}),
+    for label, kw in [("Energy rate -30%", {"dfpo": {"evening_energy_rs_per_kwh": 0.7}}),
+                      ("Energy rate +30%", {"dfpo": {"evening_energy_rs_per_kwh": 1.3}}),
                       ("Battery price -30%", {"capex": {"battery_rs_per_kwh": 0.7}}),
                       ("Battery price +30%", {"capex": {"battery_rs_per_kwh": 1.3}}),
                       ("Cycle life -30%", {"battery": {"cycle_life_efc": 0.7}}),
@@ -402,14 +431,14 @@ if __name__ == "__main__":
               f"({', '.join(f'{k} {_fmt(v)}' for k,v in o['revenue'].items())}), payouts {_fmt(o['payouts'])}, "
               f"opex {_fmt(o['opex_total'])} -> net {_fmt(o['net_cash_per_year'])}/yr, payback "
               f"{o['payback_years'] and round(o['payback_years'],1)} yr, NPV {_fmt(o['npv'])}, "
-              f"break-even DFPO Rs {o['break_even_rate_rs_per_kw_year'] and round(o['break_even_rate_rs_per_kw_year'])}/kW-yr, "
+              f"break-even energy Rs {o['break_even_rate_rs_per_kwh'] and round(o['break_even_rate_rs_per_kwh'],2)}/kWh, "
               f"max alpha {o['max_alpha_for_target_payback'] and round(o['max_alpha_for_target_payback'],2)}")
         if "max_battery_price_at_discom_max_rate" in o:
             print(f"  deal zone: paid DISCOM's max, operator NPV {_fmt(o['npv_at_discom_max_rate'])}; viable if battery <= Rs "
                   f"{o['max_battery_price_at_discom_max_rate'] and round(o['max_battery_price_at_discom_max_rate'])}/kWh "
                   f"or capital grant >= {o['grant_pct_needed_at_discom_max_rate'] and round(o['grant_pct_needed_at_discom_max_rate'])}%")
-        print(f"  DISCOM: net {_fmt(dsc['net'])}/yr ({', '.join(f'{k} {_fmt(v)}' for k,v in dsc.items() if k not in ('net','max_rate_rs_per_kw_year','npv'))}); "
-              f"max DFPO rate Rs {dsc['max_rate_rs_per_kw_year'] and round(dsc['max_rate_rs_per_kw_year'])}/kW-yr")
+        print(f"  DISCOM: net {_fmt(dsc['net'])}/yr ({', '.join(f'{k} {_fmt(v)}' for k,v in dsc.items() if k not in ('net','max_rate_rs_per_kwh','npv','gross_saving'))}); "
+              f"max energy rate Rs {dsc['max_rate_rs_per_kwh'] and round(dsc['max_rate_rs_per_kwh'],2)}/kWh; gross saving {_fmt(dsc['gross_saving'])}")
         print(f"  reliability: critical availability {rel['critical_premise_availability_pct'] and round(rel['critical_premise_availability_pct'])}%, "
               f"DT life {rel['dt_life_years_base'] and round(rel['dt_life_years_base'],1)} -> {rel['dt_life_years'] and round(rel['dt_life_years'],1)} yr, "
               f"DT-failure customer-hours avoided {rel['dt_failure_customer_hours_avoided']:,.0f}/yr, "

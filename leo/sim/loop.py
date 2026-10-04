@@ -219,6 +219,7 @@ def run_one_day(
     rng: np.random.Generator,
     dr_window: tuple[pd.Timestamp, pd.Timestamp] | None = None,
     pre_outage: tuple[pd.Timestamp, pd.Timestamp] | None = None,
+    load_adjust: dict[str, np.ndarray] | None = None,
 ) -> None:
     """`pre_outage` = (notice_ts, outage_start): from the DISCOM's load-
     shedding notice until the outage, every block holds charge and tops up
@@ -286,6 +287,11 @@ def run_one_day(
                 bus_id = bus_id_by_hhid.get(hh_id)
                 if bus_id in loads:
                     loads[bus_id] = loads[bus_id] - reduction_kw
+        # Automated DR (pump shifting, AC events): per-bus kW to subtract.
+        if leo_enabled and load_adjust:
+            for bus_id, adj in load_adjust.items():
+                if bus_id in loads:
+                    loads[bus_id] = loads[bus_id] - float(adj[i])
 
         update_household_loads(net, feeder, loads)
 
@@ -539,7 +545,7 @@ def run_outage_day(
         cur.execute(
             """INSERT INTO event (run_id, ts, kind, scope, source, payload)
                SELECT %s, ts, kind, scope, source, payload FROM event
-               WHERE run_id = %s AND kind IN ('dr_event_start','dr_event_end')""",
+               WHERE run_id = %s AND kind IN ('dr_event_start','dr_event_end','dr_auto_shift','dr_auto_ac')""",
             (run_id, source_run_id),
         )
         copy_dr_rows(conn, source_run_id, run_id)
@@ -815,6 +821,74 @@ def train_forecast_inputs(feeder, scenario, weather_15min, true_load, true_pv,
         gross_history, static_features, holidays_set
 
 
+def automated_dr(feeder, scenario: dict, truth: pd.DataFrame, plan_date, forecast_total_kw: np.ndarray,
+                 weather_15min: pd.DataFrame, net_load: pd.DataFrame, ac_window=None) -> tuple[dict, dict]:
+    """Automated DR for one day, same rules as eval/sweep.py: enrolled pumps
+    move from 18-19 IST to the midday hour with the most forecast solar
+    surplus; on an event day enrolled ACs cycle down in `ac_window`, with
+    pre-cooling before and a small rebound after. Returns ({bus_id: 96 kW to
+    subtract}, summary for the event log and settlement)."""
+    sd = scenario.get("smart_dr", {})
+    hh = feeder.household.reset_index(drop=True)
+    t = truth.set_index("household_id")
+    erng = np.random.default_rng(scenario["sim"]["seed"] + 3)
+    smart_pump = hh["id"].map(t["has_pump"]).fillna(False).to_numpy(bool) & (erng.random(len(hh)) < sd.get("pump_relay_share", 0))
+    smart_ac = hh["id"].map(t["has_ac"]).fillna(False).to_numpy(bool) & (erng.random(len(hh)) < sd.get("ac_controller_share", 0))
+    day_ts = pd.date_range(pd.Timestamp(plan_date, tz="UTC") + pd.Timedelta(minutes=15), periods=96, freq="15min")
+    start_h = ((day_ts.hour + day_ts.minute / 60.0 + 5.5 - 0.25) % 24).to_numpy()
+    orng = np.random.default_rng(abs(hash(str(plan_date))) % 2**32)
+    adjust: dict[str, np.ndarray] = {}
+    eve = np.where((start_h >= 18) & (start_h < 19))[0]
+    lo, hi = sd.get("shift_window_ist", [10, 15])
+    cand = [i for i in range(92) if lo <= start_h[i] and start_h[i + 3] + 0.25 <= hi]
+    s0 = min(cand, key=lambda i: forecast_total_kw[i:i + 4].sum())
+    pump_homes = []
+    for k in np.where(smart_pump)[0]:
+        if orng.random() < sd.get("pump_override_prob", 0):
+            continue
+        a = adjust.setdefault(hh["bus_id"].iat[k], np.zeros(96))
+        a[eve] += 0.75
+        a[s0:s0 + 4] -= 0.75
+        pump_homes.append(hh["id"].iat[k])
+    summary = {"pump_homes": pump_homes, "pump_slot_ist": float(start_h[s0]),
+               "pump_kwh": 0.75 * len(eve) * 0.25 * len(pump_homes), "ac_homes": [], "ac_kw": 0.0, "ac_kwh": 0.0,
+               "ac_payment_rs": sd.get("ac_event_payment_rs", 0), "pump_fee_rs_per_month": None}
+    if ac_window is not None:
+        temp = weather_15min.set_index("ts")["temperature_c"].reindex(day_ts).ffill().bfill().to_numpy()
+        duty = np.clip((temp - 26.0) / 8.0, 0, 1) * ((start_h + 0.25 >= 10) & (start_h + 0.25 <= 23))
+        win = np.where((day_ts > ac_window[0]) & (day_ts <= ac_window[1]))[0]
+        if len(win):
+            w0, w1 = win[0], win[-1] + 1
+            for k in np.where(smart_ac)[0]:
+                if orng.random() < sd.get("override_prob", 0):
+                    continue
+                bus = hh["bus_id"].iat[k]
+                base = net_load[bus].reindex(day_ts).to_numpy() if bus in net_load.columns else np.zeros(96)
+                cut = np.minimum(sd["ac_curtail_frac"] * 1.5 * duty[w0:w1], np.clip(base[w0:w1], 0, None))
+                e = float(cut.sum() * 0.25)
+                if e <= 0:
+                    continue
+                a = adjust.setdefault(bus, np.zeros(96))
+                a[w0:w1] += cut
+                a[max(0, w0 - 8):w0] -= sd["precool_frac"] * e / 2.0
+                a[w1:w1 + 8] -= sd["rebound_frac"] * e / 2.0
+                summary["ac_homes"].append(hh["id"].iat[k])
+                summary["ac_kw"] += float(cut.mean())
+                summary["ac_kwh"] += e
+    return adjust, summary
+
+
+def write_auto_dr_events(conn, run_id: str, summary: dict, shift_ts, ac_ts) -> None:
+    cur = conn.cursor()
+    cur.execute("INSERT INTO event (run_id, ts, kind, scope, source, payload) VALUES (%s,%s,'dr_auto_shift','all','leo',%s)",
+                (run_id, shift_ts.to_pydatetime(), psycopg2.extras.Json({k: summary[k] for k in ("pump_homes", "pump_slot_ist", "pump_kwh")})))
+    if summary["ac_homes"] and ac_ts is not None:
+        cur.execute("INSERT INTO event (run_id, ts, kind, scope, source, payload) VALUES (%s,%s,'dr_auto_ac','all','leo',%s)",
+                    (run_id, ac_ts.to_pydatetime(), psycopg2.extras.Json({k: summary[k] for k in ("ac_homes", "ac_kw", "ac_kwh", "ac_payment_rs")})))
+    conn.commit()
+    cur.close()
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--plan-date", default="2026-04-27", help="the confirmed annual peak-demand day")
@@ -844,7 +918,7 @@ def main() -> None:
     print("building feeder and world truth...")
     feeder = build_feeder(scenario)
     weather_15min = to_15min(fetch_scenario_weather(scenario))
-    true_load, true_pv, net_load = build_true_load(feeder, scenario, weather_15min, rng)
+    true_load, true_pv, net_load, truth = build_true_load(feeder, scenario, weather_15min, rng, return_truth=True)
 
     print("training the forecast models (stands in for cloud/training.py's scheduled job)...")
     inputs, gross_history, static_features, holidays_set = train_forecast_inputs(
@@ -1055,15 +1129,24 @@ def main() -> None:
 
     net = build_pandapower_net(feeder, nb["transformer_kva"], nb["nominal_v_ln"])
 
+    # Automated DR on the peak day: pumps shifted to midday, AC event in the DR window.
+    fc_total = sum(np.array(plans[p]["forecast_p50_kw"]) for p in PHASES)
+    auto_adjust, auto_summary = automated_dr(feeder, scenario, truth, plan_date, fc_total, weather_15min, net_load,
+                                             ac_window=(window_start, window_end))
+    approval_ts = run_time_1400 + pd.Timedelta(hours=4)
+    print(f"automated DR: {len(auto_summary['pump_homes'])} pumps -> {auto_summary['pump_slot_ist']:.2f} IST, "
+          f"{len(auto_summary['ac_homes'])} ACs cycled ({auto_summary['ac_kw']:.1f} kW)")
+
     if args.normal_baseline:
         print("\n=== LEO-on run ('normal') ===")
         t0 = time.perf_counter()
         run_one_day(
             conn, "normal", True, plan_date, scenario, feeder, net, net_load, approved_plans, accepted_reduction_kw,
             nb["v_limit_pct"], nb["nominal_v_ln"], modbus_host, modbus_port, rng,
-            dr_window=(window_start, window_end),
+            dr_window=(window_start, window_end), load_adjust=auto_adjust,
         )
         write_dr_window_events(conn, "normal", dr_result, window_start, window_end, len(accepted_reduction_kw))
+        write_auto_dr_events(conn, "normal", auto_summary, approval_ts, window_start)
         print(f"took {time.perf_counter()-t0:.1f}s")
 
         print("\n=== baseline run (battery + DR disabled) ===")
@@ -1129,9 +1212,10 @@ def main() -> None:
         run_one_day(
             conn, "load_shedding", True, plan_date, scenario, feeder, net, net_load, approved_plans,
             accepted_reduction_kw, nb["v_limit_pct"], nb["nominal_v_ln"], modbus_host, modbus_port, rng,
-            dr_window=(window_start, window_end), pre_outage=(notice_ts, outage_start),
+            dr_window=(window_start, window_end), pre_outage=(notice_ts, outage_start), load_adjust=auto_adjust,
         )
         write_dr_window_events(conn, "load_shedding", dr_result, window_start, window_end, len(accepted_reduction_kw))
+        write_auto_dr_events(conn, "load_shedding", auto_summary, approval_ts, window_start)
         run_outage_day(conn, "load_shedding", plan_date, scenario, feeder, outage_start, outage_end, rng,
                        source_run_id="load_shedding", cause="load_shedding")
 
@@ -1157,8 +1241,11 @@ def main() -> None:
         init_run(conn, "surplus", True, scenario["sim"]["seed"], surplus_date,
                  "sim/loop.py recorded run: sunny low-demand day, midday PV export")
         persist_forecast(conn, "surplus", surplus_artifacts, nb["dt_id"])
+        sfc = sum(np.array(surplus_plans[p]["forecast_p50_kw"]) for p in PHASES)
+        s_adjust, s_summary = automated_dr(feeder, scenario, truth, surplus_date, sfc, weather_15min, net_load)
         run_one_day(conn, "surplus", True, surplus_date, scenario, feeder, net, net_load, surplus_approved, {},
-                    nb["v_limit_pct"], nb["nominal_v_ln"], modbus_host, modbus_port, rng)
+                    nb["v_limit_pct"], nb["nominal_v_ln"], modbus_host, modbus_port, rng, load_adjust=s_adjust)
+        write_auto_dr_events(conn, "surplus", s_summary, surplus_run_time + pd.Timedelta(hours=4), None)
         init_run(conn, "surplus_baseline", False, scenario["sim"]["seed"], surplus_date,
                  "sim/loop.py recorded run: sunny low-demand day, battery disabled")
         run_one_day(conn, "surplus_baseline", False, surplus_date, scenario, feeder, net, net_load, None, {},

@@ -14,7 +14,7 @@ CREATE TYPE entry_type_t      AS ENUM (
 CREATE TYPE event_kind_t      AS ENUM (
   'power_fail','restore','grid_loss','grid_return','overload_trip',
   'dr_event_start','dr_event_end','backup_start','backup_end','citizen_report',
-  'load_shedding_notice','alert_sent');
+  'load_shedding_notice','alert_sent','dr_auto_shift','dr_auto_ac');
 CREATE TYPE rec_status_t      AS ENUM ('open','acknowledged','dispatched','resolved');
 CREATE TYPE severity_t        AS ENUM ('low','medium','high');
 CREATE TYPE critical_class_t  AS ENUM ('none','health','water','livelihood','education');

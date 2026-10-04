@@ -26,9 +26,9 @@ households:
     is_business: 0.10
 
 battery_blocks:
-  - {phase: R, capacity_kwh: 15, power_kw: 7.5}
-  - {phase: Y, capacity_kwh: 15, power_kw: 7.5}
-  - {phase: B, capacity_kwh: 15, power_kw: 7.5}
+  - {phase: R, capacity_kwh: 60, power_kw: 15}
+  - {phase: Y, capacity_kwh: 60, power_kw: 15}
+  - {phase: B, capacity_kwh: 60, power_kw: 15}
 
 sim:
   date_start: "2025-09-25"
@@ -62,3 +62,16 @@ load_shedding:
   start_ist: "19:30"
   duration_min: 90
   notice_hours: 5
+
+# Automated demand response (smart relays on pumps, smart AC controllers),
+# opt-in, opt-out per event. (verify all) against Indian smart-AC / DR pilots.
+smart_dr:
+  pump_relay_share: 0.7        # of pump owners enrolled: pump moved from 18-19 IST to LEO's midday window
+  ac_controller_share: 0.6     # of AC owners enrolled: AC cycled down on DFPO event days
+  ac_curtail_frac: 0.6         # AC duty cut during an event (cycles to 40%)
+  precool_frac: 0.3            # share of curtailed energy spent pre-cooling in the 2 h before
+  rebound_frac: 0.2            # share consumed in the 2 h after
+  ac_event_payment_rs: 75      # flat, per event, per participating home
+  override_prob: 0.10          # household overrides an AC event
+  pump_override_prob: 0.05     # household runs the pump at the usual time anyway
+  shift_window_ist: [10, 15]   # LEO picks the 1-hour slot with the most forecast solar surplus
