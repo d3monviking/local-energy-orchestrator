@@ -3,7 +3,7 @@ numbers are assigned in order of first citation."""
 
 REFS = {
     # Brief and team documents
-    "brief": "Schneider Electric Grid Reliability Hackathon, “Grid Reliability: Renewable Intermittency — making clean power dependable, neighbourhood by neighbourhood”, problem statement, 2026.",
+    "brief": "Yuva Yodha Energy Tech Hackathon, “Grid Reliability: Renewable Intermittency — making clean power dependable, neighbourhood by neighbourhood”, problem statement, 2026.",
     "research": "LEO team, “Grid Reliability and Renewable Intermittency: Architecting Dependable Local Power Networks Through Distributed Flexibility” (research plan compiling the sources cited below), October 2026.",
     "proposal": "LEO team, “LEO — Local Energy Orchestrator: Working Proposal”, Section 2 “Design Philosophy: What We Adopted, and From Where”, September 2026.",
     "arch": "LEO team, “LEO — System Architecture v3.0” and “LEO — Build Specification v1.0”, October 2026.",

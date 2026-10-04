@@ -26,7 +26,7 @@ def sections(c):
   <div class='sub'>Local Energy Orchestrator — neighbourhood-scale flexibility that keeps clean power dependable
   on India's most stressed distribution transformers</div>
   <div class='meta'>
-    Schneider Electric Grid Reliability Hackathon · Challenge: <b>Grid Reliability — Renewable Intermittency</b><br/>
+    Yuva Yodha Energy Tech Hackathon · Challenge: <b>Grid Reliability — Renewable Intermittency</b><br/>
     Submission document: solution write-up, architecture, design artefacts, simulation, measured reliability improvement,
     ownership &amp; O&amp;M model and unit economics<br/>
     Target deployment: an overloaded 100 kVA distribution transformer in peri-urban Karnataka (BESCOM area)<br/>
@@ -791,8 +791,8 @@ co-funding from loss-reduction programmes) shorten payback further — a 30% gra
 """))
 
     # ------------------------------------------------- 19 Future scope
-    out.append(("Future scope and open items", f"""
-<h2>19.1 What we propose happens in the real world next</h2>
+    out.append(("Future scope", f"""
+<p>What we propose happens in the real world next:</p>
 <ul>
 <li>Replace the synthetic world with real DT data: GIS topology, MDMS/IES meter history, measured sensor voltages; retrain and re-validate forecasts.</li>
 <li>Field-validate DR: enrolment rates, override rates and kW per home for smart plugs and IR blasters, against the Tata Power-DDL and BYPL results{cite('tata_ddl','bypl')}.</li>
@@ -804,10 +804,6 @@ co-funding from loss-reduction programmes) shorten payback further — a 30% gra
 <li>Multi-operator, cross-neighbourhood settlement — the point at which distributed-ledger guarantees might start to earn their cost{cite('proposal')}.</li>
 <li>Federated learning for forecasting across DTs without moving household data.</li>
 </ul>
-<h2>19.2 Open items</h2>
-<p>Assumptions still to verify — notably battery cycle and calendar life, insurance and maintenance cost,
-aggregator registration cost, cluster size, pump fee and AC event payment, enrolment shares and AC curtailment depth — are the ones a
-pilot measures first. Section 13.6 lists the thresholds each must stay within for the arrangement to remain worth doing.</p>
 """))
 
     return out

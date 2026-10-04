@@ -18,7 +18,7 @@ await send("Page.enable");
 await send("Page.navigate", { url: "file://" + join(here, "LEO_submission.html") });
 await sleep(4000);
 const footer = `<div style="font-family:Arial;font-size:7.5pt;color:#6e7781;width:100%;padding:0 16mm;display:flex;justify-content:space-between">
-<span>LEO — Local Energy Orchestrator · Schneider Electric Grid Reliability Hackathon</span><span><span class="pageNumber"></span> / <span class="totalPages"></span></span></div>`;
+<span>LEO — Local Energy Orchestrator · Yuva Yodha Energy Tech Hackathon</span><span><span class="pageNumber"></span> / <span class="totalPages"></span></span></div>`;
 const pdf = await send("Page.printToPDF", { printBackground: true, preferCSSPageSize: true, displayHeaderFooter: true,
   headerTemplate: "<div></div>", footerTemplate: footer, marginBottom: 0.7, marginTop: 0.6 });
 if (!pdf.data) { console.log("print failed", JSON.stringify(pdf).slice(0, 300)); process.exit(1); }
