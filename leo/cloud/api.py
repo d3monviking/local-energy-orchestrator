@@ -17,7 +17,7 @@ from datetime import datetime, timedelta
 import asyncpg
 
 from cloud import explain
-from fastapi import FastAPI, HTTPException
+from fastapi import Body, FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 
 DB_DSN = (
@@ -402,6 +402,9 @@ async def plan_for_run(run_id: str) -> dict:
                FROM plan WHERE run_id = $1 ORDER BY phase, ts_end""",
             run_id,
         )
+        await _ensure_decision_table(conn)
+        decisions = await conn.fetch(
+            "SELECT decision, decided_by, reason, decided_at FROM plan_decision WHERE run_id = $1 ORDER BY id", run_id)
     by_phase: dict[str, dict] = {}
     for r in rows:
         p = by_phase.setdefault(r["phase"], {
@@ -412,7 +415,25 @@ async def plan_for_run(run_id: str) -> dict:
         p["intervals"].append({
             "ts_end": r["ts_end"].isoformat(), "setpoint_kw": r["setpoint_kw"], "mode": r["mode"],
         })
-    return {"run_id": run_id, "phases": list(by_phase.values())}
+    approved = bool(rows) and rows[0]["approved_at"] is not None
+    last = decisions[-1]["decision"] if decisions else None
+    status = "approved" if approved else "rejected" if last == "rejected" else "pending"
+    history = [{"decision": d["decision"], "by": d["decided_by"], "reason": d["reason"],
+                "at": d["decided_at"].isoformat()} for d in decisions]
+    return {"run_id": run_id, "status": status, "decisions": history, "phases": list(by_phase.values())}
+
+
+async def _ensure_decision_table(conn) -> None:
+    await conn.execute("""CREATE TABLE IF NOT EXISTS plan_decision (
+        id BIGSERIAL PRIMARY KEY, run_id TEXT NOT NULL REFERENCES run(run_id),
+        decision TEXT NOT NULL CHECK (decision IN ('approved', 'rejected', 'withdrawn')),
+        decided_by TEXT NOT NULL, reason TEXT, decided_at TIMESTAMPTZ NOT NULL DEFAULT now())""")
+
+
+async def _record_decision(conn, run_id: str, decision: str, by: str, reason: str | None = None) -> None:
+    await _ensure_decision_table(conn)
+    await conn.execute("INSERT INTO plan_decision (run_id, decision, decided_by, reason) VALUES ($1, $2, $3, $4)",
+                       run_id, decision, by, reason)
 
 
 @app.post("/api/plan/{run_id}/{phase}/approve")
@@ -454,6 +475,7 @@ async def approve_whole_plan(run_id: str, approved_by: str = "operator-1") -> di
             "UPDATE plan SET approved_at = $2, approved_by = $3 WHERE run_id = $1 AND approved_at IS NULL",
             run_id, stamp, approved_by,
         )
+        await _record_decision(conn, run_id, "approved", approved_by)
         row = await conn.fetchrow(
             "SELECT min(approved_at) AS approved_at, max(approved_by) AS approved_by FROM plan WHERE run_id = $1", run_id)
     return {"run_id": run_id, "approved_at": row["approved_at"].isoformat() if row["approved_at"] else None,
@@ -461,12 +483,29 @@ async def approve_whole_plan(run_id: str, approved_by: str = "operator-1") -> di
 
 
 @app.post("/api/plan/{run_id}/withdraw")
-async def withdraw_plan(run_id: str) -> dict:
+async def withdraw_plan(run_id: str, by: str = "operator-1") -> dict:
     """Withdraw approval (undo, or reset the demo). Nothing reaches the
     batteries from an unapproved plan."""
     async with pool.acquire() as conn:
         await conn.execute("UPDATE plan SET approved_at = NULL, approved_by = NULL WHERE run_id = $1", run_id)
-    return {"run_id": run_id, "approved_at": None, "approved_by": None}
+        await _record_decision(conn, run_id, "withdrawn", by)
+    return {"run_id": run_id, "status": "pending"}
+
+
+@app.post("/api/plan/{run_id}/reject")
+async def reject_plan(run_id: str, reason: str = Body(..., embed=True), by: str = "operator-1") -> dict:
+    """Reject the plan, with the operator's reason. The batteries get no
+    schedule from it and no DR messages go out; the reason is kept with
+    the decision so the plan can be revisited."""
+    reason = reason.strip()
+    if not reason:
+        raise HTTPException(422, "a reason is required to reject a plan")
+    async with pool.acquire() as conn:
+        if await conn.fetchval("SELECT 1 FROM plan WHERE run_id = $1 LIMIT 1", run_id) is None:
+            raise HTTPException(404, f"no plan for run {run_id!r}")
+        await conn.execute("UPDATE plan SET approved_at = NULL, approved_by = NULL WHERE run_id = $1", run_id)
+        await _record_decision(conn, run_id, "rejected", by, reason)
+    return {"run_id": run_id, "status": "rejected", "reason": reason}
 
 
 @app.get("/api/dr_events/{run_id}")

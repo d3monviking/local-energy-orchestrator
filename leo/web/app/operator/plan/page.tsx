@@ -25,6 +25,14 @@ type PlanPhase = {
 type DrOffer = { household_id: string; level: number; is_holdout: boolean };
 type DrEvent = { event_id: string; phase: string; window_start: string; window_end: string; target_kw: number; n_offers: number; n_holdout: number; offers: DrOffer[] };
 type RunEvent = { ts: string; kind: string; payload: Record<string, unknown> };
+type Decision = { decision: "approved" | "rejected" | "withdrawn"; by: string; reason: string | null; at: string };
+type Status = "approved" | "rejected" | "pending";
+
+const REJECT_REASONS = [
+  "The forecast looks wrong for tomorrow",
+  "A battery is down for maintenance",
+  "The DISCOM has announced work on this transformer",
+];
 
 type Row = { ts: string; p10: number; p50: number; p90: number; setpoint: number; after: number };
 
@@ -211,6 +219,10 @@ function Legend() {
 
 export default function PlanReview() {
   const [run, setRun] = useState("normal");
+  useEffect(() => {
+    const r = new URLSearchParams(window.location.search).get("run");
+    if (r && DAYS.some((d) => d.run === r)) setRun(r);
+  }, []);
   const [meta, setMeta] = useState<RunMeta | null>(null);
   const [plan, setPlan] = useState<PlanPhase[] | null>(null);
   const [forecast, setForecast] = useState<Forecast | null>(null);
@@ -221,6 +233,10 @@ export default function PlanReview() {
   const [busy, setBusy] = useState(false);
   const [notice, setNotice] = useState("");
   const dialogRef = useRef<HTMLDialogElement>(null);
+  const rejectRef = useRef<HTMLDialogElement>(null);
+  const [status, setStatus] = useState<Status>("pending");
+  const [decisions, setDecisions] = useState<Decision[]>([]);
+  const [reason, setReason] = useState("");
 
   const load = useCallback(async () => {
     setError(null);
@@ -237,6 +253,8 @@ export default function PlanReview() {
       ]);
       setMeta((cat as RunMeta[]).find((m) => m.run_id === run) ?? null);
       setPlan(p.phases);
+      setStatus(p.status ?? (p.phases[0]?.approved_at ? "approved" : "pending"));
+      setDecisions(p.decisions ?? []);
       setForecast(f);
       setPredicted((pe as PredictedEvent[]).filter((e) => e.predicted_at));
       setRunEvents(ev);
@@ -281,7 +299,6 @@ export default function PlanReview() {
   }, [rowsByPhase, rating]);
 
   const approval = plan?.[0] ? { at: plan[0].approved_at, by: plan[0].approved_by } : null;
-  const approved = !!approval?.at;
 
   const pump = runEvents.find((e) => e.kind === "dr_auto_shift")?.payload as
     | { pump_kwh: number; pump_homes: string[]; pump_slot_ist: number } | undefined;
@@ -302,22 +319,39 @@ export default function PlanReview() {
   const sumAfter = summary.reduce((a, s) => a + s.overAfter, 0);
   const fmtH = (h: number) => (h === 0 ? "no time" : `${h % 1 ? h.toFixed(2).replace(/0$/, "") : h} hours`);
 
-  async function act(path: "approve" | "withdraw") {
+  async function decide(action: "approve" | "reject" | "withdraw") {
     setBusy(true);
     setNotice("");
     try {
-      const r = await fetch(`${CLOUD_API_URL}/api/plan/${run}/${path}`, { method: "POST" });
-      if (!r.ok) throw new Error(`The server returned ${r.status}`);
+      const r = await fetch(`${CLOUD_API_URL}/api/plan/${run}/${action}`, {
+        method: "POST",
+        ...(action === "reject" ? { headers: { "Content-Type": "application/json" }, body: JSON.stringify({ reason }) } : {}),
+      });
+      if (!r.ok) throw new Error(`the server returned ${r.status}`);
       const p = await fetch(`${CLOUD_API_URL}/api/plan/${run}`).then((x) => x.json());
       setPlan(p.phases);
-      setNotice(path === "approve" ? "Plan approved. Batteries and DR will follow it." : "Approval withdrawn. Nothing will be sent until you approve again.");
+      setStatus(p.status);
+      setDecisions(p.decisions ?? []);
+      setNotice(
+        action === "approve" ? "Plan approved. The batteries will follow it and the DR messages go out now."
+          : action === "reject" ? "Plan rejected. Nothing will be sent to the batteries or to households."
+            : "Approval withdrawn. The plan is waiting for your decision again.",
+      );
       dialogRef.current?.close();
+      rejectRef.current?.close();
+      setReason("");
     } catch (e) {
-      setNotice(`Could not ${path === "approve" ? "approve" : "withdraw"} the plan: ${e instanceof Error ? e.message : e}. Try again.`);
+      setNotice(`Could not ${action} the plan: ${e instanceof Error ? e.message : e}. Try again.`);
     } finally {
       setBusy(false);
     }
   }
+
+  // The recorded approval predates the decision log, so show it as the first entry.
+  const history: Decision[] = decisions.length
+    ? decisions
+    : approval?.at ? [{ decision: "approved", by: approval.by ?? "operator", reason: null, at: approval.at }] : [];
+  const lastRejected = [...decisions].reverse().find((d) => d.decision === "rejected");
 
   const dayTitle = meta ? istDate(meta.sim_start, { weekday: "short", day: "numeric", month: "short", year: "numeric" }) : "";
 
@@ -360,33 +394,89 @@ export default function PlanReview() {
 
       {plan && plan.length > 0 && (
         <>
-          {/* decision */}
+          {/* decision workflow */}
+          <ol aria-label="Planning steps" className="mt-6 grid grid-cols-2 gap-3 text-sm md:grid-cols-4">
+            {[
+              { n: 1, title: "Forecast made", when: forecast?.issued_at ? `${fmtTime(forecast.issued_at, true)} IST` : "19:30 IST", state: "done" },
+              { n: 2, title: "Plan drafted by LEO", when: "after the forecast", state: "done" },
+              { n: 3, title: "Your decision", when: "by 23:30 IST", state: status === "pending" ? "current" : status === "rejected" ? "stopped" : "done" },
+              { n: 4, title: "Plan runs", when: "05:30 IST, for 24 hours", state: status === "approved" ? "next" : "blocked" },
+            ].map((st) => (
+              <li key={st.n} aria-current={st.state === "current" ? "step" : undefined}
+                className={`flex items-start gap-2.5 rounded-md border px-3 py-2 ${st.state === "current" ? "border-[var(--leo-warn)] bg-[rgb(224_167_46/0.08)]" : "border-[var(--leo-border)]"}`}>
+                <span aria-hidden className={`mt-0.5 flex h-5 w-5 shrink-0 items-center justify-center rounded-full text-xs font-bold ${
+                  st.state === "done" ? "bg-[var(--leo-ok)] text-[#06140c]"
+                    : st.state === "current" ? "bg-[var(--leo-warn)] text-[#1a1204]"
+                      : st.state === "stopped" ? "bg-[var(--leo-bad-fill)] text-white"
+                        : "border border-[var(--leo-border)] text-[var(--leo-text-dim)]"}`}>
+                  {st.state === "done" ? "✓" : st.state === "stopped" ? "✕" : st.n}
+                </span>
+                <span>
+                  <span className="block font-medium">{st.title}</span>
+                  <span className="block text-[13px] text-[var(--leo-text-dim)]">
+                    {st.state === "stopped" ? "rejected" : st.state === "blocked" ? "only after approval" : st.when}
+                  </span>
+                </span>
+              </li>
+            ))}
+          </ol>
+
           <section
             aria-labelledby="decision"
-            className={`mt-6 flex flex-wrap items-center justify-between gap-4 rounded-lg border p-4 ${approved ? "border-[var(--leo-border)] bg-[var(--leo-panel)]" : "border-[var(--leo-warn)] bg-[rgb(224_167_46/0.08)]"}`}
+            className={`mt-3 rounded-lg border p-4 ${status === "pending" ? "border-[var(--leo-warn)] bg-[rgb(224_167_46/0.08)]" : status === "rejected" ? "border-[var(--leo-bad-fill)] bg-[rgb(224_71_62/0.08)]" : "border-[var(--leo-border)] bg-[var(--leo-panel)]"}`}
           >
-            <div>
-              <h2 id="decision" className="text-base font-semibold">
-                {approved ? "Approved" : "Waiting for your approval"}
-              </h2>
-              <p className="mt-0.5 text-sm text-[var(--leo-text-dim)]">
-                {approved
-                  ? `Approved by ${approval?.by} at ${fmtTime(approval!.at!, true)} IST. The batteries follow this plan, and the DR messages below go out at approval.`
-                  : "Nothing reaches the batteries or any household until you approve."}
+            <div className="flex flex-wrap items-center justify-between gap-4">
+              <div className="max-w-[70ch]">
+                <h2 id="decision" className="text-base font-semibold">
+                  {status === "approved" ? "Approved" : status === "rejected" ? "Rejected" : "Waiting for your decision"}
+                </h2>
+                <p className="mt-0.5 text-sm text-[var(--leo-text-dim)]">
+                  {status === "approved"
+                    ? `Approved by ${approval?.by} at ${fmtTime(approval!.at!, true)} IST. The batteries follow this plan, and the DR messages below go out at approval.`
+                    : status === "rejected"
+                      ? `Rejected by ${lastRejected?.by}: “${lastRejected?.reason}”. The batteries get no schedule from this plan and no messages go out. You can still approve it before 05:30 IST.`
+                      : "Review what the plan does below, then approve or reject it. Nothing reaches the batteries or any household until you approve."}
+                </p>
+              </div>
+              <div className="flex items-center gap-3">
+                {status === "approved" ? (
+                  <button type="button" disabled={busy} onClick={() => decide("withdraw")} className="rounded-md border border-[var(--leo-border)] px-3 py-2 text-sm hover:bg-[var(--leo-panel-raised)] disabled:opacity-60">
+                    {busy ? "Withdrawing…" : "Withdraw approval"}
+                  </button>
+                ) : (
+                  <>
+                    {status === "pending" && (
+                      <button type="button" disabled={busy} onClick={() => rejectRef.current?.showModal()} className="rounded-md border border-[var(--leo-bad-fill)] px-4 py-2 text-sm font-semibold text-[var(--leo-bad)] hover:bg-[rgb(224_71_62/0.12)] disabled:opacity-60">
+                        Reject…
+                      </button>
+                    )}
+                    <button type="button" disabled={busy} onClick={() => dialogRef.current?.showModal()} className="rounded-md bg-[var(--leo-accent)] px-4 py-2 text-sm font-semibold text-[#06121f] hover:brightness-110 disabled:opacity-60">
+                      {status === "rejected" ? "Approve instead…" : "Approve…"}
+                    </button>
+                  </>
+                )}
+              </div>
+            </div>
+            <p role="status" className="mt-3 text-sm empty:hidden">{notice}</p>
+            {status !== "approved" && (
+              <p className="mt-3 text-[13px] text-[var(--leo-text-dim)]">
+                This is a recorded day, so the map replay still shows what happened under the approved plan.
               </p>
-            </div>
-            <div className="flex items-center gap-3">
-              {approved ? (
-                <button type="button" disabled={busy} onClick={() => act("withdraw")} className="rounded-md border border-[var(--leo-border)] px-3 py-2 text-sm hover:bg-[var(--leo-panel-raised)] disabled:opacity-60">
-                  {busy ? "Withdrawing…" : "Withdraw approval"}
-                </button>
-              ) : (
-                <button type="button" disabled={busy} onClick={() => dialogRef.current?.showModal()} className="rounded-md bg-[var(--leo-accent)] px-4 py-2 text-sm font-semibold text-[#06121f] hover:brightness-110 disabled:opacity-60">
-                  Review and approve
-                </button>
-              )}
-            </div>
-            <p role="status" className="w-full text-sm empty:hidden">{notice}</p>
+            )}
+            {history.length > 0 && (
+              <details className="mt-3 text-sm">
+                <summary className="cursor-pointer text-[var(--leo-text-dim)] hover:text-[var(--leo-text)]">Decision history ({history.length})</summary>
+                <ol className="mt-2 space-y-1 border-l border-[var(--leo-border)] pl-3">
+                  {history.map((d, i) => (
+                    <li key={i}>
+                      <span className="text-[var(--leo-text-dim)]">{fmtTime(d.at, true)} IST</span>{" "}
+                      <span className="font-medium">{d.decision === "approved" ? "Approved" : d.decision === "rejected" ? "Rejected" : "Approval withdrawn"}</span> by {d.by}
+                      {d.reason && <>: “{d.reason}”</>}
+                    </li>
+                  ))}
+                </ol>
+              </details>
+            )}
           </section>
 
           {/* expected outcome */}
@@ -523,7 +613,7 @@ export default function PlanReview() {
         aria-labelledby="confirm-title"
         className="m-auto w-[min(560px,calc(100vw-32px))] rounded-lg border border-[var(--leo-border)] bg-[var(--leo-panel)] p-0 text-[var(--leo-text)] backdrop:bg-black/60"
       >
-        <form method="dialog" className="p-5" onSubmit={(e) => { e.preventDefault(); act("approve"); }}>
+        <form method="dialog" className="p-5" onSubmit={(e) => { e.preventDefault(); decide("approve"); }}>
           <h2 id="confirm-title" className="text-lg font-semibold">Approve the plan for {dayTitle}?</h2>
           <ul className="mt-3 list-disc space-y-1 pl-5 text-sm text-[var(--leo-text-dim)]">
             {summary.map((s) => (
@@ -540,6 +630,37 @@ export default function PlanReview() {
             <button type="button" onClick={() => dialogRef.current?.close()} className="rounded-md border border-[var(--leo-border)] px-3 py-2 text-sm hover:bg-[var(--leo-panel-raised)]">Cancel</button>
             <button type="submit" disabled={busy} className="rounded-md bg-[var(--leo-accent)] px-4 py-2 text-sm font-semibold text-[#06121f] hover:brightness-110 disabled:opacity-60">
               {busy ? "Approving…" : "Approve plan"}
+            </button>
+          </div>
+        </form>
+      </dialog>
+
+      <dialog
+        ref={rejectRef}
+        aria-labelledby="reject-title"
+        className="m-auto w-[min(560px,calc(100vw-32px))] rounded-lg border border-[var(--leo-border)] bg-[var(--leo-panel)] p-0 text-[var(--leo-text)] backdrop:bg-black/60"
+      >
+        <form method="dialog" className="p-5" onSubmit={(e) => { e.preventDefault(); if (reason.trim()) decide("reject"); }}>
+          <h2 id="reject-title" className="text-lg font-semibold">Reject the plan for {dayTitle}?</h2>
+          <p className="mt-2 text-sm text-[var(--leo-text-dim)]">
+            The batteries get no schedule from this plan and no DR messages go out. Your reason is kept with the decision.
+          </p>
+          <label htmlFor="reject-reason" className="mt-4 block text-sm font-medium">Reason</label>
+          <div className="mt-2 flex flex-wrap gap-1.5">
+            {REJECT_REASONS.map((r) => (
+              <button key={r} type="button" onClick={() => setReason(r)}
+                className="rounded-full border border-[var(--leo-border)] px-2.5 py-1 text-xs text-[var(--leo-text-dim)] hover:text-[var(--leo-text)]">
+                {r}
+              </button>
+            ))}
+          </div>
+          <textarea id="reject-reason" required value={reason} onChange={(e) => setReason(e.target.value)} rows={3}
+            placeholder="Why should this plan not run?"
+            className="mt-2 w-full rounded-md border border-[var(--leo-border)] bg-[var(--leo-panel-raised)] px-3 py-2 text-sm" />
+          <div className="mt-5 flex justify-end gap-3">
+            <button type="button" onClick={() => rejectRef.current?.close()} className="rounded-md border border-[var(--leo-border)] px-3 py-2 text-sm hover:bg-[var(--leo-panel-raised)]">Cancel</button>
+            <button type="submit" disabled={busy || !reason.trim()} className="rounded-md bg-[#c4352d] px-4 py-2 text-sm font-semibold text-white hover:brightness-110 disabled:opacity-50">
+              {busy ? "Rejecting…" : "Reject plan"}
             </button>
           </div>
         </form>

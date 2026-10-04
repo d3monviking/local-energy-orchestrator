@@ -9,6 +9,7 @@
  */
 
 import { useEffect, useMemo, useState } from "react";
+import Link from "next/link";
 import FeederMap from "@/components/map/FeederMap";
 import Timeline, { TimelineEventKind, TimelineEventMarker } from "@/components/timeline/Timeline";
 import ForecastPanel from "@/components/operator/ForecastPanel";
@@ -65,6 +66,11 @@ export default function OperatorHome() {
   const compareRunId = scenario.withoutLeo && runId === scenario.withLeo ? scenario.withoutLeo : null;
   const [compareForecast, setCompareForecast] = useState<Forecast | null>(null);
   const [showMore, setShowMore] = useState(false);
+  const [planStatus, setPlanStatus] = useState<string | null>(null);
+  useEffect(() => {
+    setPlanStatus(null);
+    getJSON<{ status?: string } | null>(`/api/plan/${scenario.withLeo}`, null).then((p) => setPlanStatus(p?.status ?? null));
+  }, [scenario.withLeo]);
   const [currentTs, setCurrentTs] = useState<string | null>(null);
   const [playing, setPlaying] = useState(false);
   const [seek, setSeek] = useState<{ ts: string; nonce: number } | null>(null);
@@ -258,6 +264,12 @@ export default function OperatorHome() {
         <span className="text-sm text-[var(--leo-text-dim)]">
           LEO mode <span className="font-medium text-[var(--leo-text)]">{run?.leo_enabled ? MODE_LABEL[currentMode] ?? currentMode : "Off"}</span>
         </span>
+        {planStatus && (
+          <Link href={`/operator/plan${scenario.withLeo === "surplus" ? "?run=surplus" : ""}`}
+            className={`rounded-md border px-3 py-1.5 text-sm hover:bg-[var(--leo-panel-raised)] ${planStatus === "pending" ? "border-[var(--leo-warn)] text-[var(--leo-warn)]" : planStatus === "rejected" ? "border-[var(--leo-bad-fill)] text-[var(--leo-bad)]" : "border-[var(--leo-border)]"}`}>
+            Day plan: <span className="font-medium">{planStatus === "approved" ? "approved" : planStatus === "rejected" ? "rejected" : "needs your decision"}</span> ›
+          </Link>
+        )}
         <button type="button" onClick={() => setShowGlossary(true)}
           className="ml-auto rounded-md border border-[var(--leo-border)] px-3 py-1.5 text-sm hover:bg-[var(--leo-panel-raised)]">
           What am I looking at?

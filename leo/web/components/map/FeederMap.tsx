@@ -17,7 +17,8 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import DeckGL from "@deck.gl/react";
 import { TileLayer } from "@deck.gl/geo-layers";
-import { BitmapLayer, GeoJsonLayer, ScatterplotLayer, TextLayer } from "@deck.gl/layers";
+import { BitmapLayer, GeoJsonLayer, IconLayer, ScatterplotLayer } from "@deck.gl/layers";
+import { batteryIcon, criticalIcon, sensorIcon, transformerIcon } from "./icons";
 import { WebMercatorViewport, type PickingInfo } from "@deck.gl/core";
 
 const CLOUD_API_URL =
@@ -94,10 +95,9 @@ type Feature = GeoJSON.Feature<GeoJSON.Geometry, FeederProperties>;
  *  so they are drawn as a labelled cluster around it instead of stacked dots. */
 const SITE_OFFSET: Record<string, [number, number]> = {
   transformer: [0, 0],
-  "BATT-R": [92, -24], "BATT-Y": [92, 0], "BATT-B": [92, 24],
-  busbar: [-92, 0],
+  "BATT-R": [42, -36], "BATT-Y": [42, 0], "BATT-B": [42, 36],
+  busbar: [-40, 0],
 };
-const FAREND_OFFSET: Record<string, [number, number]> = { R: [0, -20], Y: [-64, 6], B: [64, 6] };
 
 export default function FeederMap({
   dtId,
@@ -247,7 +247,6 @@ export default function FeederMap({
     const busbar = pointFeatures.filter((f) => f.properties.feature_type === "sensor" && f.properties.placement === "busbar");
     const farEnd = pointFeatures.filter((f) => f.properties.feature_type === "sensor" && f.properties.placement === "far_end");
     const pos = (f: Feature) => (f.geometry as GeoJSON.Point).coordinates as [number, number];
-    const font = typeof document !== "undefined" ? getComputedStyle(document.body).fontFamily : "sans-serif";
 
     const lineColor = (f: Feature): [number, number, number] => {
       if (!busState) return [150, 162, 175];
@@ -282,7 +281,7 @@ export default function FeederMap({
       id: "homes",
       data: homes,
       getPosition: pos,
-      getRadius: (f) => (f.properties.feature_type === "bus" ? 2 : f.properties.is_critical || backupBusIds?.has(f.properties.bus_id ?? f.properties.id) ? 5 : 3.5),
+      getRadius: (f) => (f.properties.feature_type === "bus" ? 2 : 3.5),
       getFillColor: (f) => {
         const busId = f.properties.bus_id ?? f.properties.id;
         if (busState?.[busId] != null) return voltageColor(busState[busId].voltage_v, nominalV, vLimitPct);
@@ -291,9 +290,9 @@ export default function FeederMap({
       },
       getLineColor: (f) => {
         if (backupBusIds?.has(f.properties.bus_id ?? f.properties.id)) return [63, 198, 198];
-        return f.properties.is_critical ? [255, 255, 255] : [5, 8, 12, 200];
+        return [5, 8, 12, 200];
       },
-      getLineWidth: (f) => (backupBusIds?.has(f.properties.bus_id ?? f.properties.id) || f.properties.is_critical ? 2 : 1),
+      getLineWidth: (f) => (backupBusIds?.has(f.properties.bus_id ?? f.properties.id) ? 2 : 1),
       lineWidthUnits: "pixels",
       stroked: true,
       radiusUnits: "pixels",
@@ -301,64 +300,38 @@ export default function FeederMap({
       pickable: true,
     });
 
-    // True positions of site equipment and far-end sensors.
-    const anchors = new ScatterplotLayer<Feature>({
-      id: "equipment-anchors",
-      data: [...(transformer ? [transformer] : []), ...farEnd],
-      getPosition: pos,
-      getRadius: (f) => (f.properties.feature_type === "transformer" ? 6 : 5),
-      getFillColor: (f) => (f.properties.feature_type === "transformer" ? [255, 255, 255] : [196, 181, 253]),
-      getLineColor: [5, 8, 12],
-      getLineWidth: 2,
-      lineWidthUnits: "pixels",
-      stroked: true,
-      radiusUnits: "pixels",
-      pickable: true,
-    });
-
-    type Label = { f: Feature; text: string; offset: [number, number]; kind: "transformer" | "battery" | "sensor" };
-    const labels: Label[] = [];
+    // Equipment as icons. The transformer, batteries and busbar sensors share the
+    // DT's coordinate, so they sit as a small cluster around it, offset in pixels.
+    type Marker = { f: Feature; url: string; id: string; size: number; offset: [number, number]; pin?: boolean };
+    const markers: Marker[] = [];
     if (transformer) {
-      labels.push({ f: transformer, text: "Transformer", offset: SITE_OFFSET.transformer, kind: "transformer" });
       for (const b of batteries) {
-        const d = b.properties.phase ? liveDispatchByPhase?.[b.properties.phase] : undefined;
-        const soc = d ? `  ${(d.soc_after * 100).toFixed(0)}%` : "";
-        labels.push({ f: { ...b, geometry: transformer.geometry }, text: `Battery ${b.properties.phase}${soc}`, offset: SITE_OFFSET[b.properties.id] ?? [92, 0], kind: "battery" });
+        const ph = b.properties.phase ?? "";
+        const d = ph ? liveDispatchByPhase?.[ph] : undefined;
+        const soc = d ? Math.round(d.soc_after * 10) / 10 : null;
+        markers.push({ f: { ...b, geometry: transformer.geometry }, url: batteryIcon(ph, soc), id: `batt-${ph}-${soc}`, size: 36, offset: SITE_OFFSET[b.properties.id] ?? [42, 0] });
       }
-      if (busbar.length) labels.push({ f: { ...busbar[0], geometry: transformer.geometry }, text: "Sensors R Y B", offset: SITE_OFFSET.busbar, kind: "sensor" });
+      if (busbar.length) markers.push({ f: { ...busbar[0], geometry: transformer.geometry }, url: sensorIcon(), id: "sensor", size: 30, offset: SITE_OFFSET.busbar });
+      markers.push({ f: transformer, url: transformerIcon(), id: "transformer", size: 40, offset: SITE_OFFSET.transformer });
     }
-    for (const f of farEnd) {
-      labels.push({ f, text: `Far-end sensor ${f.properties.phase}`, offset: FAREND_OFFSET[f.properties.phase ?? "R"] ?? [0, -20], kind: "sensor" });
+    for (const f of farEnd) markers.push({ f, url: sensorIcon(f.properties.phase), id: `sensor-${f.properties.phase}`, size: 30, offset: [0, 0] });
+    for (const f of homes.filter((h) => h.properties.is_critical)) {
+      const onBackup = !!backupBusIds?.has(f.properties.bus_id ?? f.properties.id);
+      markers.push({ f, url: criticalIcon(onBackup), id: `critical-${onBackup}`, size: 32, offset: [0, -3], pin: true });
     }
-    const PILL: Record<Label["kind"], { bg: [number, number, number, number]; fg: [number, number, number, number] }> = {
-      transformer: { bg: [255, 255, 255, 245], fg: [11, 15, 20, 255] },
-      battery: { bg: [63, 198, 198, 245], fg: [6, 22, 24, 255] },
-      sensor: { bg: [196, 181, 253, 245], fg: [24, 16, 48, 255] },
-    };
-    const siteLabels = new TextLayer<Label>({
-      id: "equipment-labels",
-      data: labels,
-      getPosition: (l) => pos(l.f),
-      getText: (l) => l.text,
-      getPixelOffset: (l) => l.offset,
-      getColor: (l) => PILL[l.kind].fg,
-      getSize: 12,
-      fontFamily: font,
-      fontWeight: 600,
-      characterSet: "auto",
-      background: true,
-      getBackgroundColor: (l) => PILL[l.kind].bg,
-      getBorderColor: [5, 8, 12, 255],
-      getBorderWidth: 1,
-      backgroundBorderRadius: 4,
-      backgroundPadding: [6, 3],
-      getTextAnchor: "middle",
-      getAlignmentBaseline: "center",
-      updateTriggers: { getText: [liveDispatchByPhase] },
+    const equipment = new IconLayer<Marker>({
+      id: "equipment-icons",
+      data: markers,
+      getPosition: (m) => pos(m.f),
+      getIcon: (m) => ({ url: m.url, id: m.id, width: 48, height: 48, anchorY: m.pin ? 48 : 24 }),
+      getSize: (m) => m.size,
+      sizeUnits: "pixels",
+      getPixelOffset: (m) => m.offset,
+      updateTriggers: { getIcon: [liveDispatchByPhase, backupBusIds] },
       pickable: true,
     });
 
-    return [tileLayer, lineCasing, feederLines, points, anchors, siteLabels];
+    return [tileLayer, lineCasing, feederLines, points, equipment];
   }, [data, busState, nominalV, vLimitPct, backupBusIds, liveDispatchByPhase]);
 
   return (
@@ -384,7 +357,7 @@ export default function FeederMap({
         </div>
       )}
 
-      <details className="group absolute top-2 right-2 rounded-md border border-white/10 bg-[rgb(11_15_20/0.88)] text-xs leading-snug backdrop-blur-sm open:w-56">
+      <details className="group absolute top-2 right-2 rounded-md border border-white/10 bg-[rgb(11_15_20/0.9)] text-xs leading-snug backdrop-blur-sm open:w-64">
         <summary className="flex cursor-pointer select-none list-none items-center gap-3 px-3 py-1.5 text-[var(--leo-text)] [&::-webkit-details-marker]:hidden">
           {[
             ["rgb(47,191,113)", "ok"],
@@ -416,21 +389,25 @@ export default function FeederMap({
           </div>
           <div className="flex flex-col gap-1.5">
             <span className="text-[var(--leo-text-dim)]">Equipment</span>
-            <span className="flex flex-wrap gap-1.5">
-              <span className="rounded bg-white px-1.5 py-0.5 font-semibold text-[#0b0f14]">Transformer</span>
-              <span className="rounded bg-[#3fc6c6] px-1.5 py-0.5 font-semibold text-[#061618]">Battery</span>
-              <span className="rounded bg-[#c4b5fd] px-1.5 py-0.5 font-semibold text-[#181030]">Sensor</span>
-            </span>
+            {[
+              [transformerIcon(), "Transformer"],
+              [batteryIcon("", 0.6), "Battery, one per phase (fill = charge)"],
+              [sensorIcon(), "Sensor (at the transformer and line ends)"],
+              [criticalIcon(), "Critical premise"],
+              [criticalIcon(true), "Critical premise on backup power"],
+            ].map(([src, t]) => (
+              <span key={t} className="flex items-center gap-2">
+                {/* eslint-disable-next-line @next/next/no-img-element */}
+                <img src={src} alt="" width={20} height={20} className="shrink-0" />
+                {t}
+              </span>
+            ))}
           </div>
           <div className="flex flex-col gap-1.5">
             <span className="text-[var(--leo-text-dim)]">Homes</span>
             <span className="flex items-center gap-2">
-              <span aria-hidden className="inline-block h-2.5 w-2.5 rounded-full border-2 border-white bg-[rgb(47,191,113)]" />
-              critical premise
-            </span>
-            <span className="flex items-center gap-2">
-              <span aria-hidden className="inline-block h-2.5 w-2.5 rounded-full border-2 border-[#3fc6c6] bg-[rgb(47,191,113)]" />
-              on backup power
+              <span aria-hidden className="ml-1 inline-block h-2.5 w-2.5 rounded-full border border-black bg-[rgb(47,191,113)]" />
+              <span className="ml-1.5">home, coloured by voltage</span>
             </span>
           </div>
         </div>

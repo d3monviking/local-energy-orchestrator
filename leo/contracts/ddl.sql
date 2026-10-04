@@ -246,6 +246,17 @@ CREATE TABLE plan (
   PRIMARY KEY (run_id, plan_date, phase, ts_end)
 );
 
+-- Every operator decision on a plan, in order: the audit trail behind
+-- plan.approved_at. A rejected or withdrawn plan never reaches the batteries.
+CREATE TABLE IF NOT EXISTS plan_decision (
+  id          BIGSERIAL PRIMARY KEY,
+  run_id      TEXT NOT NULL REFERENCES run(run_id),
+  decision    TEXT NOT NULL CHECK (decision IN ('approved', 'rejected', 'withdrawn')),
+  decided_by  TEXT NOT NULL,
+  reason      TEXT,
+  decided_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
 CREATE TABLE mode_transition (
   run_id    TEXT NOT NULL REFERENCES run(run_id),
   ts        TIMESTAMPTZ NOT NULL,
