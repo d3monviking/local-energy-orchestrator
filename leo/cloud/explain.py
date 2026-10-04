@@ -277,7 +277,7 @@ async def action_log(conn, run_id: str) -> list[dict]:
         parts = [f"{p['phase']}: charge {p['charge_kwh']:.1f} kWh, discharge {p['discharge_kwh']:.1f} kWh" for p in plan]
         add(plan[0]["approved_at"], "Operator", "plan", f"Battery plan approved by {plan[0]['approved_by']}",
             " · ".join(parts),
-            "Charge in the midday window where the network has headroom; discharge into the forecast violation windows; hold a 15% reserve",
+            "Fill each block in the midday trough (rooftop-solar export first), then spread its energy over the forecast evening peak so the highest-load intervals are cut most; re-solved every 15 min live; never below a 15% reserve",
             link="/operator/plan")
 
     # DR
@@ -330,6 +330,15 @@ async def action_log(conn, run_id: str) -> list[dict]:
         rule, mode = r["rule_triggered"], r["mode"]
         if mode == "backup":
             return None
+        if rule == "peak_shave":
+            return ("discharge", "plan", "Peak shaving: the stored energy is spread over the evening so the highest-load "
+                    "intervals are cut most — re-solved every 15 min from the busbar CT, so it can't run empty before the peak")
+        if rule == "valley_fill":
+            return ("charge", "plan", "Charging in the midday trough, lowest-load intervals first, to be full for the evening peak")
+        if rule == "absorb_surplus":
+            return ("charge", "plan", "Absorbing rooftop solar the phase is exporting — stored for the evening when solar is gone")
+        if rule == "pre_outage_reserve":
+            return ("charge", "pre_outage", "Pre-outage: topping up to the reserve the backup premises need through the scheduled cut")
         if rule == "pre_outage_charge":
             return ("charge", "pre_outage", "Pre-outage: raising reserve ahead of the scheduled cut — charging within the safe limit")
         if rule == "pre_outage_hold":

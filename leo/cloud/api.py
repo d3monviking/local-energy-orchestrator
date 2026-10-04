@@ -340,6 +340,34 @@ async def run_catalog() -> list[dict]:
     ]
 
 
+@app.get("/api/impact")
+async def impact(sweep_id: str | None = None) -> dict:
+    """Reliability metrics and unit economics from the year-sampled sweep
+    (eval/sweep.py + eval/economics.py), plus a per-month breakdown."""
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            """SELECT sweep_id, computed_at, result FROM eval_economics
+               WHERE ($1::text IS NULL OR sweep_id = $1)
+               ORDER BY (sweep_id = 'year') DESC, computed_at DESC LIMIT 1""", sweep_id)
+        if row is None:
+            raise HTTPException(404, "no sweep has been evaluated yet - run eval.sweep then eval.economics")
+        monthly = await conn.fetch(
+            """SELECT config, date_trunc('month', day)::date AS month,
+                      avg((metrics->>'evening_peak_kw')::float) AS evening_peak_kw,
+                      avg((metrics->>'peak_loading_pct')::float) AS peak_loading_pct,
+                      sum((metrics->>'aging_hours')::float) AS aging_hours,
+                      sum((metrics->>'battery_discharge_kwh')::float) AS discharge_kwh,
+                      sum((metrics->'dr'->>'verified_kwh')::float) AS dr_kwh,
+                      sum((metrics->>'cust_min_under')::float) / 60 AS undervoltage_cust_h,
+                      sum((metrics->>'crit_out_min')::float) / 60 AS crit_out_h,
+                      sum((metrics->>'crit_served_min')::float) / 60 AS crit_served_h,
+                      max((metrics->>'temp_max_c')::float) AS temp_max_c
+               FROM eval_day WHERE sweep_id = $1 GROUP BY 1, 2 ORDER BY 2, 1""", row["sweep_id"])
+    result = row["result"] if isinstance(row["result"], dict) else json.loads(row["result"])
+    return {"sweep_id": row["sweep_id"], "computed_at": row["computed_at"].isoformat(), **result,
+            "monthly": [dict(r) | {"month": r["month"].isoformat()} for r in monthly]}
+
+
 @app.get("/api/events/{run_id}")
 async def events_for_run(run_id: str) -> list[dict]:
     """Event markers for the timeline (§8.1): overload trips, outage/
