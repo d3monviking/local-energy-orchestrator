@@ -30,6 +30,7 @@ def sections(c):
     Submission document: solution write-up, architecture, design artefacts, simulation, measured reliability improvement,
     ownership &amp; O&amp;M model and unit economics<br/>
     Target deployment: an overloaded 100 kVA distribution transformer in peri-urban Karnataka (BESCOM area)<br/>
+    <b>Team: Siddharth Kini · Priyanshu Tiwari</b><br/>
     October 2026
   </div>
   <h2 style='margin-top:26pt'>Contents</h2>
@@ -284,10 +285,34 @@ exactly the energy the block can take — the lowest-load midday intervals are t
 local surplus first. The same solver runs day-ahead on the P50 forecast (the plan the operator approves) and every 15 minutes on
 what is left of the window, with the phase load measured by the busbar CT and the forecast bias-corrected. A far-end overvoltage
 triggers extra charging. SoC stays within 15–90%. In Pre-outage the floor rises to 1.5× the backup premises' allowance for the
-announced cut; in Backup the floor drops to 5%. The architecture's reference-trajectory idea from Huang et al.{cite('huang')} and a
-convex planner{cite('cvxpy')} remain as the next planner; the water-filling planner is its closed-form special case for a single
-objective (flatten the peak) and is what we evaluated.</p>
+announced cut; in Backup the floor drops to 5%.</p>
 
+<h3>The reference-trajectory (IRT) planner, after Huang et al.</h3>
+<p>Huang et al. schedule storage with a <i>prediction-free, dual-reference online optimisation</i>: instead of trusting a
+multi-hour forecast, the battery tracks two learned reference signals — an <b>Informative Reference Trajectory</b> (a target
+state-of-charge curve built from similarity-weighted historical days) and a <b>real-time value benchmark</b>{cite('huang')}. We adopted
+this scheduling idea because LEO cannot rely on accurate long-horizon forecasts, and we did not adopt the paper's double-auction
+market (Section 9). LEO implements it in three parts:</p>
+<ol>
+<li><b>Trajectory library (offline).</b> For every historical day and phase, a perfect-foresight linear program using that day's true
+load and PV, with charging priced at the ToD tariff and discharge valued at an IEX-proxy price weighted by the day's own net-load
+shape, gives the SoC trajectory the battery <i>would</i> have followed had it known the day in advance. In deployment the library is
+progressively replaced by realised operating history.</li>
+<li><b>Similarity blend (day-ahead).</b> Tomorrow is matched to historical days using only what is known a day ahead — forecast
+mean and maximum temperature, a clear-sky index, day type and festival flag — with a Gaussian kernel on standardised features and a
+penalty for a day-type mismatch; the ten nearest days' trajectories are blended, weighted by similarity, into one reference SoC
+curve per phase. Household load is never used, because it is not available in time.</li>
+<li><b>Convex day-ahead plan.</b> A quadratic program (cvxpy/OSQP){cite('cvxpy')} minimises
+<i>ToD charging cost − flexibility value of discharge in forecast-violation intervals + λ·Σ(SoC − SoC<sub>IRT</sub>)²</i>, subject to SoC
+dynamics with round-trip efficiency, the battery's power rating, the network model's per-interval safe charge/discharge limits, the
+SoC window and the reserve floor in every interval. The deviation term keeps the plan close to what worked on similar days, so a
+forecast error moves the plan less.</li>
+</ol>
+<p><b>Which planner ran in the evaluation.</b> The year-long evaluation in Sections 10–11 used the water-filling planner: its single
+objective is exactly the one the DT needs (flatten the evening peak), it is closed-form and explainable, and the same solver runs the
+15-minute live re-solve. The IRT planner is implemented and exercised on sample days; it becomes the default once ToD tariffs reach the
+operator's connection and realised history replaces the bootstrap library, because it adds price awareness and history-based robustness
+that water-filling lacks.</p>
 <h2>7.5 Demand response (C8)</h2>
 <p><b>Event days.</b> DFPO is measured in kW at a single instance in the peak period{cite('merc')}, so DR is reserved for the year's
 most stressed days — the top 5% by forecast evening peak, about 22 events a year, 2 hours each. Tata Power-DDL called 12–16 events a
@@ -493,7 +518,7 @@ The recommended configuration is three 60 kWh blocks on 15 kW inverters plus aut
  <div class='kpi'><div class='v'>{n(rel['solar_absorbed_kwh'])} kWh</div><div class='l'>rooftop solar per year stored locally instead of exported ({n(100*rel['solar_absorbed_kwh']/rel['solar_export_kwh'])}% of export)</div></div>
 </div>
 {fig('04_energy_day.png', 'The intermittency bridge on the year&apos;s peak day (27 April): midday charging from rooftop solar, 20 pumps moved to 10:45, the evening discharge spread across the peak, and the automated AC event with SMS offers. The transformer peak falls from 186 kW to 116 kW.')}
-{table(["Configuration", "Evening peak avg (kW)", "Worst day (kW)", "Verified kW (M5)", "Critical availability (M3)", "DT failure rate", "Hours overloaded", "Undervoltage cust-h (M2)", "Losses (kWh)"], rows, "Reliability by configuration, per transformer per year (selected configurations; Appendix B lists all).", "num")}
+{table(["Configuration", "Evening peak avg (kW)", "Worst day (kW)", "Verified kW (M5)", "Critical availability (M3)", "DT failure rate", "Hours overloaded", "Undervoltage cust-h (M2)", "Losses (kWh)"], rows, "Reliability by configuration, per transformer per year (selected configurations).", "num")}
 <h2>11.1 Reading the results</h2>
 <ul>
 <li><b>Outage hours.</b> LEO reduces outage hours through two channels: critical premises stay powered through faults and announced load
@@ -576,7 +601,7 @@ never negative.</p>
     out.append(("Unit economics and affordability", f"""
 <p>Unit economics are computed by multiplying the simulated physical quantities (kW verified, kWh shifted, hourly grid import,
 transformer ageing, backup minutes, DR offers and payouts) by prices in one assumptions file, each tagged with its source
-(Appendix A). Recommended configuration: three 60 kWh blocks on 15 kW inverters plus automated DR, per transformer, per year, in a
+in the model's assumptions file. Recommended configuration: three 60 kWh blocks on 15 kW inverters plus automated DR, per transformer, per year, in a
 cluster of {A['operating_model']['dts_per_operator']} DTs.</p>
 <h2>13.1 Capital cost</h2>
 {table(["Item (per DT)", "₹"], capex_rows, f"Capital cost. Battery at ₹{n(A['capex']['battery_rs_per_kwh'])}/kWh (second-life, 40–60% of new{cite('wri_2l','pvmag_2l')}); inverters ₹1.2 L per 7.5–15 kW unit; sensors + concentrator ₹30,000; gateway ₹25,000; backup meters + cabling ₹4,000 per premise{cite('research')}; IR blaster ₹999, smart plug bundle ₹2,090{cite('smart_devices')}.", "num")}
@@ -751,34 +776,9 @@ co-funding from loss-reduction programmes) shorten payback further — a 30% gra
 <li>Federated learning for forecasting across DTs without moving household data.</li>
 </ul>
 <h2>19.2 Open items</h2>
-<p>Assumptions still marked <i>to verify</i> in Appendix A — notably battery cycle and calendar life, insurance and maintenance cost,
+<p>Assumptions still to verify — notably battery cycle and calendar life, insurance and maintenance cost,
 aggregator registration cost, cluster size, pump fee and AC event payment, enrolment shares and AC curtailment depth — are the ones a
 pilot measures first. Section 13.6 lists the thresholds each must stay within for the arrangement to remain worth doing.</p>
 """))
 
-    # ------------------------------------------------- 20 Team
-    out.append(("Team", """
-<p><i>[Team member names, roles and backgrounds to be added.]</i></p>
-<table><thead><tr><th>Name</th><th>Role in LEO</th><th>Background</th></tr></thead><tbody>
-<tr><td>[Name]</td><td>[e.g. architecture, simulation and gateway]</td><td>[ ]</td></tr>
-<tr><td>[Name]</td><td>[e.g. forecasting, DR engine, settlement and consoles]</td><td>[ ]</td></tr>
-</tbody></table>
-"""))
-
-    # ------------------------------------------------- Appendices
-    out.append(("Appendix A — Assumptions register", f"""
-<p>Every price and cost used in Section 13, with its source or status. “Sourced” = research report, regulation, market data or web
-source; “to verify” = an assumption a pilot should confirm. Physical quantities come from the simulation, not from this table.</p>
-{table(["Section", "Assumption", "Value", "Source / note", "Status"], c['assumptions_rows'](), "Assumptions register (economics.yaml).")}
-"""))
-    allrows = []
-    for r in E["results"]:
-        rl, o, d, p = r["reliability"], r["operator"], r["discom"], r["physical"]
-        allrows.append([r["label"], n(rl["evening_peak_kw_mean"]), n(p["verified_peak_kw"], 1), f"{n(rl['critical_premise_availability_pct'] or 0)}%",
-                        lakh(o["capex_total"]), n(o["payback_years"], 1) if o["payback_years"] else "—", lakh(o["npv"]), lakh(d["gross_saving"]),
-                        lakh(r["system_npv"])])
-    out.append(("Appendix B — All configurations compared", f"""
-{table(["Configuration", "Evening peak (kW)", "Verified kW", "Critical availability", "Capex", "Payback (yr)", "Operator NPV", "DISCOM gross / yr", "Combined NPV"], allrows,
-        f"All configurations against the baseline (evening peak {n(rel['evening_peak_kw_mean_base'])} kW). Operator figures at the assumed contract rate and α = {alpha:.0%}.", "num")}
-"""))
     return out
