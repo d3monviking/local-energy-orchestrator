@@ -61,9 +61,9 @@ export default function DrEventsView() {
               </div>
             </div>
 
-            <p className="text-xs text-[var(--leo-text-dim)] mb-2">Incentive level distribution</p>
+            <p className="text-xs text-[var(--leo-text-dim)] mb-2">Offers by amount (rupees per event)</p>
             <div className="flex gap-2">
-              {[0, 0.25, 0.5, 0.75].map((level) => {
+              {[0, 25, 50, 100].map((level) => {
                 const count = byLevel.get(level) ?? 0;
                 const max = Math.max(1, ...byLevel.values());
                 return (
@@ -74,7 +74,7 @@ export default function DrEventsView() {
                         style={{ height: `${(count / max) * 100}%`, background: "var(--leo-accent)", minHeight: count > 0 ? 4 : 0 }}
                       />
                     </div>
-                    <p className="text-xs text-[var(--leo-text-dim)] mt-1">{(level * 100).toFixed(0)}% · {count}</p>
+                    <p className="text-xs text-[var(--leo-text-dim)] mt-1">{level === 0 ? "appeal" : `₹${level}`} · {count}</p>
                   </div>
                 );
               })}

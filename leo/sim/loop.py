@@ -55,7 +55,7 @@ from gateway.forecast.load_model import build_features, FEATURE_COLUMNS, train a
 from gateway.forecast.pv_model import unit_pv_output_kw, fit_k, compute_clear_midday_mask, pass0_initial_load_estimate
 from gateway.forecast.run import ForecastInputs, run_day_ahead_plan, approve_plan
 from gateway.orchestrator.planner_shave import live_setpoint
-from cloud.dr_engine.linucb import LinUCB, choose_level
+from cloud.dr_engine.linucb import LinUCB, choose_level, build_feature_vector, LEVELS
 from cloud.dr_engine.selection import run_dr_event, ensure_default_consent
 from sim.personas import respond_to_offer
 from sim import measure
@@ -70,7 +70,7 @@ TRIP_CONSECUTIVE_INTERVALS = 4
 TRIP_REPAIR_INTERVALS = 8
 
 DR_WINDOW_IST = (19, 21)  # storyboard beat 2: "Phase R goes amber then red at 19:15"
-V_RUPEES_PER_KWH = 6.0
+V_RUPEES_PER_KWH = 7.92  # IEX evening peak premium (research note); energy value of a kWh cut
 MODBUS_WATCHDOG_S = 120  # comfortably longer than one interval's real-time Modbus round trip
 
 
@@ -958,10 +958,15 @@ def main() -> None:
     # tell one household apart from another. Training on a different
     # population builds none of that for the households actually in
     # today's event.
-    engagement_acc = {hh_id: {"offers": 0, "replied": 0, "verified_kwh_sum": 0.0} for hh_id in hh_features}
+    from eval.sweep import engagement_features, record_response
+    engagement_acc = {hh_id: {"offers": 0, "replied": 0, "kwh": 0.0, "ao": 0, "ar": 0, "po": 0, "pr": 0}
+                      for hh_id in hh_features}
     for day in range(30):
-        event = {"start_hour_frac": 19 / 24, "duration_hours": 2.0, "day_of_week_frac": (day % 7) / 7,
-                 "forecast_temp_c": float(rng.uniform(24, 36)), "hours_notice": 20.0}
+        # Randomised pilot at real event times/temperatures and a real offer
+        # cadence (same as eval/sweep.py pretrain_bandit, which explains why).
+        start_h = float(rng.choice(np.arange(17.0, 21.0, 0.25)))
+        event = {"start_hour_frac": start_h / 24, "duration_hours": 2.0, "day_of_week_frac": (day % 7) / 7,
+                 "forecast_temp_c": float(rng.uniform(28, 38)), "hours_notice": 20.0}
         for hh_id, feat in hh_features.items():
             persona = hh_persona.get(hh_id)
             if persona is None:
@@ -970,23 +975,17 @@ def main() -> None:
                          "has_ac_or_cooler": float(feat["has_ac_or_cooler"]), "has_pump": float(feat["has_pump"]),
                          "is_business": float(feat["is_business"])}
             acc = engagement_acc[hh_id]
-            engagement = {
-                "offers_received": acc["offers"],
-                "past_response_rate": acc["replied"] / acc["offers"] if acc["offers"] else 0.0,
-                "avg_verified_kwh": acc["verified_kwh_sum"] / acc["offers"] if acc["offers"] else 0.0,
-                "days_since_last_offer": 30.0 if acc["offers"] == 0 else 1.0,
-            }
-            choice = choose_level(bandit, household, engagement, event, V_RUPEES_PER_KWH)
+            gap = 30.0 if acc["offers"] == 0 else float(rng.integers(3, 31))
+            engagement = engagement_features(acc, gap, int(rng.integers(0, 4)))
+            level = float(rng.choice(LEVELS))
+            choice = {"level": level, "x": build_feature_vector(household, engagement, event, level)}
             response = respond_to_offer(
-                persona, choice["level"], window_baseline_kw=feat["typical_window_kw"],
-                window_hours=event["duration_hours"], window_start_local_hour=19.0,
-                mean_temperature_c=event["forecast_temp_c"], days_since_last_offer=engagement["days_since_last_offer"],
-                rng=rng,
+                persona, level, window_baseline_kw=feat["typical_window_kw"],
+                window_hours=event["duration_hours"], window_start_local_hour=start_h,
+                mean_temperature_c=event["forecast_temp_c"], days_since_last_offer=gap, rng=rng,
             )
             bandit.update(choice["x"], response.verified_kwh)
-            acc["offers"] += 1
-            acc["replied"] += int(response.accepted)
-            acc["verified_kwh_sum"] += response.verified_kwh
+            record_response(acc, level, response)
     print("bandit trained.")
     # Narrow back down for the live decision: theta is already learned,
     # so the UCB bonus only needs to be large enough to keep adapting,
@@ -1000,16 +999,7 @@ def main() -> None:
     # offers_received/past_response_rate/avg_verified_kwh, the household-
     # differentiating signal the bandit actually learned from, carry
     # forward. offers_this_month stays real (0, this being day one).
-    engagement_override = {
-        hh_id: {
-            "offers_received": acc["offers"],
-            "past_response_rate": acc["replied"] / acc["offers"] if acc["offers"] else 0.0,
-            "avg_verified_kwh": acc["verified_kwh_sum"] / acc["offers"] if acc["offers"] else 0.0,
-            "days_since_last_offer": 10.0,
-            "offers_this_month": 0,
-        }
-        for hh_id, acc in engagement_acc.items()
-    }
+    engagement_override = {hh_id: engagement_features(acc, 10.0, 0) for hh_id, acc in engagement_acc.items()}
 
     print("running the real DR event (selection + SMS send)...")
     sms_url = os.environ.get("SMS_URL", "http://localhost:8012")

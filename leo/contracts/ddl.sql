@@ -287,7 +287,7 @@ CREATE TABLE dr_offer (
   run_id        TEXT NOT NULL,
   event_id      TEXT NOT NULL,
   household_id  TEXT NOT NULL REFERENCES household(id),
-  level         DOUBLE PRECISION NOT NULL CHECK (level IN (0,0.25,0.5,0.75)),
+  level         DOUBLE PRECISION NOT NULL CHECK (level IN (0,25,50,100)),  -- flat offer, rupees per event
   predicted_kwh DOUBLE PRECISION NOT NULL,
   sent_at       TIMESTAMPTZ,
   channel       TEXT,

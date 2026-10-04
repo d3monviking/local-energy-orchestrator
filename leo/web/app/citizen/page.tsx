@@ -4,7 +4,7 @@ import { useEffect, useState } from "react";
 import { formatRupees } from "@/lib/format";
 
 const CLOUD_API_URL = process.env.NEXT_PUBLIC_CLOUD_API_URL ?? "http://localhost:8030";
-const HOUSEHOLD_ID = "HH-094"; // matches lib/auth.ts's stub household session
+const HOUSEHOLD_ID = "HH-103"; // matches lib/auth.ts's stub household session
 
 type CitizenSummary = {
   household_id: string;
@@ -162,7 +162,7 @@ export default function CitizenApp() {
                 <p className="text-sm mb-3">
                   {o.level === 0
                     ? "Please help avoid a local power cut tonight by cutting back your usage."
-                    : `Earn about ₹${Math.round(o.level * 6 * o.predicted_kwh)} if you switch off your cooler ${new Date(o.window_start).toLocaleTimeString("en-IN", { hour12: false })}–${new Date(o.window_end).toLocaleTimeString("en-IN", { hour12: false })} tonight.`}
+                    : `Earn ₹${Math.round(o.level)} if you switch off your cooler or pump ${new Date(o.window_start).toLocaleTimeString("en-IN", { hour12: false })}–${new Date(o.window_end).toLocaleTimeString("en-IN", { hour12: false })} tonight.`}
                 </p>
                 <p className="text-xs">
                   {o.is_holdout

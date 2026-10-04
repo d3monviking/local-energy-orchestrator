@@ -25,13 +25,11 @@ const COOKIE_NAME = "leo_session";
 const STUB_USERS: Record<string, { password: string; session: Session }> = {
   operator: { password: "operator", session: { role: "operator", name: "Operator" } },
   discom: { password: "discom", session: { role: "discom", name: "DISCOM" } },
-  // HH-094: a real (price-sensitive) household from the recorded 'normal'
-  // run that accepted a paid level-0.25 DR offer and earned a dr_incentive.
-  // The DR event targets the phase with the largest forecast residual
-  // above the transformer rating after the battery plan - phase Y on the
-  // peak day - so the citizen must be on Y. (Was HH-008, a phase-R shop,
-  // when the event was fixed to phase R.)
-  household: { password: "household", session: { role: "household", name: "HH-094" } },
+  // HH-103: a real household from the recorded 'normal' run that accepted
+  // a flat Rs 25 DR offer (offers are rupees per event now, chosen by the
+  // bandit) and earned it. The DR event targets the phase with the largest
+  // forecast residual above the transformer rating - phase Y on the peak day.
+  household: { password: "household", session: { role: "household", name: "HH-103" } },
 };
 
 export function checkCredentials(username: string, password: string): Session | null {

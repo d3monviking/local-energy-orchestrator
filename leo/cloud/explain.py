@@ -292,7 +292,7 @@ async def action_log(conn, run_id: str) -> list[dict]:
         exp_kw = sum(o["predicted_kwh"] for o in sent) / hours
         acc = [o for o in offers if o["replied"]]
         ver_kw = sum(o["verified_kwh"] or 0 for o in acc) / hours
-        lvl = ", ".join(f"{n}× {'appeal only' if l == 0 else f'{int(l*100)}% incentive'}" for l, n in sorted(levels.items()))
+        lvl = ", ".join(f"{n}× {'appeal only' if l == 0 else f'₹{int(l)} offer'}" for l, n in sorted(levels.items()))
         # Offers go out once the operator approves the combined battery+DR
         # plan (§9.1) — never before it.
         approved_at = plan[0]["approved_at"] if plan and plan[0]["approved_at"] else None

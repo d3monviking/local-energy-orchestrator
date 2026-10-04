@@ -29,7 +29,7 @@ PERSONAS = ("price_sensitive", "comfort_first", "already_flexible", "non_respons
 @dataclass(frozen=True)
 class PersonaParams:
     base_accept: float          # logit at level 0, comfortable weather, well-rested
-    incentive_sensitivity: float  # logit gain per unit of incentive level (0..0.75)
+    incentive_sensitivity: float  # logit gain per unit of the old 0..0.75 level scale; Rs 100 = 0.75 (see respond_to_offer)
     heat_sensitivity: float     # logit loss per degree C above a comfort reference
     fatigue_sensitivity: float  # logit loss per "too-recent" offer
     reduction_mean_frac: float  # mean fractional cut to the window's baseline load, once accepted
@@ -59,12 +59,15 @@ PERSONA_PARAMS: dict[str, PersonaParams] = {
     # Will take the appeal on a mild day, but protects its AC/cooler hard
     # once it's hot — the persona Build Spec §5.5 calls out by name.
     "comfort_first": PersonaParams(
-        base_accept=0.1, incentive_sensitivity=1.0, heat_sensitivity=0.22,
+        base_accept=-0.4, incentive_sensitivity=1.6, heat_sensitivity=0.22,
         fatigue_sensitivity=0.04, reduction_mean_frac=0.20, reduction_std_frac=0.07,
     ),
-    # Responds to the appeal alone (level 0); incentive adds little on top.
+    # Responds to the appeal alone (level 0) more than anyone else; money
+    # adds a little on top. (verify) Unpaid-appeal response was 80% here,
+    # which let the bandit buy most of its kW for free; behavioural pilots
+    # see far less, so it is ~60% now and ~40% for comfort-first.
     "already_flexible": PersonaParams(
-        base_accept=1.4, incentive_sensitivity=0.3, heat_sensitivity=0.05,
+        base_accept=0.4, incentive_sensitivity=1.2, heat_sensitivity=0.05,
         fatigue_sensitivity=0.03, reduction_mean_frac=0.25, reduction_std_frac=0.06,
     ),
     # Essentially never responds, at any incentive level.
@@ -127,7 +130,10 @@ def respond_to_offer(
     if params.blackout_hours is not None and _in_blackout(params.blackout_hours, window_start_local_hour):
         return OfferResponse(accepted=False, verified_kwh=0.0)
 
-    incentive_effect = params.incentive_sensitivity * level
+    # `level` is the offer in rupees per event. Calibrated so Rs 100 has the
+    # effect the old top level (0.75) had: a price-sensitive household
+    # accepts ~30% at Rs 25, ~55% at Rs 50, ~90% at Rs 100 on a mild day.
+    incentive_effect = params.incentive_sensitivity * 0.75 * level / 100.0
     heat_effect = params.heat_sensitivity * max(0.0, mean_temperature_c - HEAT_COMFORT_REF_C)
     if days_since_last_offer is None:
         fatigue_effect = 0.0
@@ -154,7 +160,7 @@ if __name__ == "__main__":
     print(f"{'persona':>16} " + " ".join(f"L={l:<5}" for l in (0, 0.25, 0.5, 0.75)))
     for persona in PERSONAS:
         rates = []
-        for level in (0.0, 0.25, 0.5, 0.75):
+        for level in (0.0, 25.0, 50.0, 100.0):
             n_accept = sum(
                 respond_to_offer(
                     persona, level, window_baseline_kw=1.0, window_hours=2.0,
@@ -170,7 +176,7 @@ if __name__ == "__main__":
     for temp in (26.0, 38.0):
         n_accept = sum(
             respond_to_offer(
-                "comfort_first", 0.5, window_baseline_kw=1.0, window_hours=2.0,
+                "comfort_first", 50.0, window_baseline_kw=1.0, window_hours=2.0,
                 window_start_local_hour=19.0, mean_temperature_c=temp,
                 days_since_last_offer=30, rng=rng,
             ).accepted
@@ -182,7 +188,7 @@ if __name__ == "__main__":
     for hour in (14.0, 21.0):
         n_accept = sum(
             respond_to_offer(
-                "small_business", 0.5, window_baseline_kw=1.0, window_hours=2.0,
+                "small_business", 50.0, window_baseline_kw=1.0, window_hours=2.0,
                 window_start_local_hour=hour, mean_temperature_c=30.0,
                 days_since_last_offer=30, rng=rng,
             ).accepted

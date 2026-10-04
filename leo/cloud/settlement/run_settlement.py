@@ -91,7 +91,8 @@ def settle_dr_incentives(conn, run_id: str, plan_date: date_cls) -> tuple[pd.Dat
     )
     rows = []
     for _, r in df.iterrows():
-        amount_paise = round(r["level"] * r["v_paise_kwh"] * r["verified_kwh"])
+        # Flat offer (rupees per event), owed once the reduction is verified.
+        amount_paise = round(r["level"] * 100) if (r["verified_kwh"] or 0) > 0 else 0
         if amount_paise <= 0:
             continue
         rows.append({

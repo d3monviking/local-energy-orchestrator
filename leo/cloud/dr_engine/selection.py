@@ -290,5 +290,4 @@ def _offer_message(level: float, predicted_kwh: float, v_rupees_per_kwh: float, 
     window = f"{start.strftime('%-I%p').lower()}-{end.strftime('%-I%p').lower()}"
     if level == 0:
         return f"Please help avoid a local power cut tonight by cutting back {window}."
-    rupees = round(level * v_rupees_per_kwh * predicted_kwh)
-    return f"Earn about Rs {rupees} if you switch off your cooler {window} tonight."
+    return f"Earn Rs {round(level)} if you switch off your cooler or pump {window} tonight."

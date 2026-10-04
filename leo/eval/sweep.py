@@ -65,7 +65,7 @@ from gateway.network_model import build_pandapower_net, run_power_flow, compute_
 from gateway.forecast.run import forecast_phase_net_load_kw
 from gateway.orchestrator.planner_shave import plan_day, live_setpoint, in_window, DISCHARGE_WINDOW_IST
 from gateway.outage import MAX_CURRENT_A_BY_PRIORITY, PRIORITY_BY_CRITICAL_CLASS
-from cloud.dr_engine.linucb import LinUCB, choose_level
+from cloud.dr_engine.linucb import LinUCB, choose_level, build_feature_vector, LEVELS
 from sim.personas import respond_to_offer
 from sim.loop import build_true_load, train_forecast_inputs, db_connect, V_RUPEES_PER_KWH
 
@@ -86,6 +86,12 @@ REBOUND_FRACTION = 0.5        # (verify) share of DR-reduced energy consumed aft
 REBOUND_INTERVALS = 8
 DR_WINDOW_INTERVALS = 8       # 2-hour events
 DR_SEARCH_IST = (17.0, 21.0)  # window may start anywhere in this range
+# DR is a scarce resource (offer fatigue, flat Rs 25-100 payouts) and DFPO
+# pays for kW at the peak instant, so events are called only on the most
+# stressed days: forecast evening peak >= ~1.5x the transformer rating,
+# the top ~2% of days (~8 events/yr).
+DR_EVENT_MIN_PEAK_KW = 146.0
+MONTHLY_OFFER_CAP, MIN_DAYS_BETWEEN_OFFERS = 4, 3  # cloud/dr_engine/selection.py
 HOLDOUT_FRAC = 0.10
 
 # IEEE C57.91 clause 7 thermal model, ONAN distribution transformer.
@@ -105,6 +111,10 @@ CONFIGS = {
     # ~5 evening hours, so a smaller (cheaper) inverter may lose little.
     "leo_30_c4": {"battery": (30.0, 7.5), "dr": True, "label": "LEO, 3 x 30 kWh, 7.5 kW inverters"},
     "leo_45_c4": {"battery": (45.0, 11.25), "dr": True, "label": "LEO, 3 x 45 kWh, 11 kW inverters"},
+    # One 15 kW inverter per phase costs the same Rs 1.2 L as a 7.5 kW one
+    # (research: 7.5-15 kW units ~Rs 1.2 L each), so use all of it.
+    "leo_45_15": {"battery": (45.0, 15.0), "dr": True, "label": "LEO, 3 x 45 kWh, 15 kW inverters"},
+    "leo_60_15": {"battery": (60.0, 15.0), "dr": True, "label": "LEO, 3 x 60 kWh, 15 kW inverters"},
 }
 
 W: dict = {}  # the world, built once in the parent and inherited by forked workers
@@ -156,29 +166,58 @@ def load_shedding_days(scenario: dict, weeks: list[list[date_cls]]) -> dict[date
     return out
 
 
+def engagement_features(a: dict, days_since: float, offers_this_month: int) -> dict:
+    return {"offers_received": a["offers"],
+            "past_response_rate": a["replied"] / a["offers"] if a["offers"] else 0.0,
+            "avg_verified_kwh": a["kwh"] / a["offers"] if a["offers"] else 0.0,
+            "days_since_last_offer": days_since, "offers_this_month": offers_this_month,
+            "appeal_response_rate": a["ar"] / a["ao"] if a["ao"] else 0.0,
+            "paid_response_rate": a["pr"] / a["po"] if a["po"] else 0.0}
+
+
+def record_response(a: dict, level: float, resp) -> None:
+    ok = int(resp.accepted and resp.verified_kwh > 0)
+    a["offers"] += 1
+    a["replied"] += int(resp.accepted)
+    a["kwh"] += resp.verified_kwh
+    if level > 0:
+        a["po"] += 1
+        a["pr"] += ok
+    else:
+        a["ao"] += 1
+        a["ar"] += ok
+
+
 def pretrain_bandit(hh: pd.DataFrame, rng: np.random.Generator) -> tuple[LinUCB, dict]:
     """Same offline pre-training as sim/loop.py main(): 30 simulated days
     of history against these households, explore wide, then serve narrow."""
     bandit = LinUCB(alpha=0.6)
-    acc = {r.id: {"offers": 0, "replied": 0, "kwh": 0.0} for r in hh.itertuples()}
+    acc = {r.id: {"offers": 0, "replied": 0, "kwh": 0.0, "ao": 0, "ar": 0, "po": 0, "pr": 0} for r in hh.itertuples()}
     for day in range(30):
-        event = {"start_hour_frac": 19 / 24, "duration_hours": 2.0, "day_of_week_frac": (day % 7) / 7,
-                 "forecast_temp_c": float(rng.uniform(24, 36)), "hours_notice": 20.0}
+        # Pilot events at the times and temperatures real events happen
+        # (17:00-21:00 starts, hot evenings): trained only at 19:00, the
+        # bandit learned to pay shops that are still open at 18:00.
+        start_h = float(rng.choice(np.arange(DR_SEARCH_IST[0], DR_SEARCH_IST[1], 0.25)))
+        event = {"start_hour_frac": start_h / 24, "duration_hours": 2.0, "day_of_week_frac": (day % 7) / 7,
+                 "forecast_temp_c": float(rng.uniform(28, 38)), "hours_notice": 20.0}
         for r in hh.itertuples():
             a = acc[r.id]
-            eng = {"offers_received": a["offers"],
-                   "past_response_rate": a["replied"] / a["offers"] if a["offers"] else 0.0,
-                   "avg_verified_kwh": a["kwh"] / a["offers"] if a["offers"] else 0.0,
-                   "days_since_last_offer": 30.0 if a["offers"] == 0 else 1.0}
-            choice = choose_level(bandit, r.dr_features, eng, event, V_RUPEES_PER_KWH)
+            # Pilot cadence: offers 3-30 days apart, as served offers are
+            # (3-day minimum, 4/month cap). Training at 1 day apart and
+            # serving at 30 made the model extrapolate and over-predict.
+            gap = 30.0 if a["offers"] == 0 else float(rng.integers(3, 31))
+            eng = engagement_features(a, gap, int(rng.integers(0, 4)))
+            # Pre-launch pilot: offers are RANDOMISED across levels (an A/B
+            # trial), so the bandit learns what Rs 50 and Rs 100 actually buy;
+            # greedy pre-training never tried them and so never learned it.
+            level = float(rng.choice(LEVELS))
+            choice = {"level": level, "x": build_feature_vector(r.dr_features, eng, event, level)}
             resp = respond_to_offer(r.persona, choice["level"], window_baseline_kw=r.dr_features["typical_window_kw"],
-                                    window_hours=2.0, window_start_local_hour=19.0,
+                                    window_hours=2.0, window_start_local_hour=start_h,
                                     mean_temperature_c=event["forecast_temp_c"],
-                                    days_since_last_offer=eng["days_since_last_offer"], rng=rng)
+                                    days_since_last_offer=gap, rng=rng)
             bandit.update(choice["x"], resp.verified_kwh)
-            a["offers"] += 1
-            a["replied"] += int(resp.accepted)
-            a["kwh"] += resp.verified_kwh
+            record_response(a, level, resp)
     bandit.alpha = 0.15
     return bandit, acc
 
@@ -324,7 +363,7 @@ def run_task(task: tuple[str, int]) -> list[dict]:
     all_backup_idx = np.where(hh["id"].isin(W["backup"]["household_id"]))[0]
 
     engagement = copy.deepcopy(W["engagement"])
-    last_offer: dict[str, date_cls] = {}
+    last_offer: dict[str, list[date_cls]] = {}
     trip_left = {p: 0 for p in PHASES}
     consec = {p: 0 for p in PHASES}
     top_oil = None
@@ -363,13 +402,15 @@ def run_task(task: tuple[str, int]) -> list[dict]:
                 if battery else np.zeros(96) for p in PHASES}
         dr_red = np.zeros_like(base)
         m_dr = {"events": 0, "offers": 0, "accepted": 0, "holdout": 0, "verified_kwh": 0.0,
-                "incentive_rs": 0.0, "rebound_kwh": 0.0, "target_kw": 0.0}
+                "incentive_rs": 0.0, "rebound_kwh": 0.0, "target_kw": 0.0, "reduction_kw": 0.0,
+                "offered_rs": {}}
         if cfg["dr"]:
             resid = {p: fc[p]["p50"] - np.clip(plan[p], 0, None) for p in PHASES}
             excess = sum(np.clip(resid[p] - rating_kw_phase, 0, None) for p in PHASES)
             starts = [i for i in range(96 - DR_WINDOW_INTERVALS - REBOUND_INTERVALS)
                       if DR_SEARCH_IST[0] <= local_h[i] - 0.25 < DR_SEARCH_IST[1]]
-            if starts and excess.max() > 0:
+            fc_peak = float(max(sum(fc[p]["p50"][i] for p in PHASES) for i in range(96) if 16.5 <= local_h[i] < 23.5))
+            if starts and excess.max() > 0 and fc_peak >= DR_EVENT_MIN_PEAK_KW:
                 w0 = max(starts, key=lambda i: excess[i:i + DR_WINDOW_INTERVALS].sum())
                 win = slice(w0, w0 + DR_WINDOW_INTERVALS)
                 m_dr["events"] = 1
@@ -381,17 +422,21 @@ def run_task(task: tuple[str, int]) -> list[dict]:
                     if target <= 0:
                         continue
                     m_dr["target_kw"] += target
-                    pool = [i for i in np.where(phase_mask[p])[0] if hh["id"].iat[i] not in last_offer]
+                    def eligible(hid):
+                        past = last_offer.get(hid, [])
+                        return (not past or (d - past[-1]).days >= MIN_DAYS_BETWEEN_OFFERS) and \
+                            sum((d - x).days < 30 for x in past) < MONTHLY_OFFER_CAP
+                    pool = [i for i in np.where(phase_mask[p])[0] if eligible(hh["id"].iat[i])]
                     rng.shuffle(pool)
                     n_hold = int(len(pool) * HOLDOUT_FRAC)
                     m_dr["holdout"] += n_hold
                     scored = []
                     for i in pool[n_hold:]:
-                        a = engagement[hh["id"].iat[i]]
-                        eng = {"offers_received": a["offers"],
-                               "past_response_rate": a["replied"] / a["offers"] if a["offers"] else 0.0,
-                               "avg_verified_kwh": a["kwh"] / a["offers"] if a["offers"] else 0.0,
-                               "days_since_last_offer": 10.0, "offers_this_month": 0}
+                        hid_ = hh["id"].iat[i]
+                        eng = engagement_features(
+                            engagement[hid_],
+                            float((d - last_offer[hid_][-1]).days) if hid_ in last_offer else 30.0,
+                            sum((d - x).days < 30 for x in last_offer.get(hid_, [])))
                         scored.append((i, choose_level(bandit, hh["dr_features"].iat[i], eng, event, V_RUPEES_PER_KWH)))
                     scored.sort(key=lambda s: -s[1]["profit"])
                     predicted = 0.0
@@ -405,17 +450,21 @@ def run_task(task: tuple[str, int]) -> list[dict]:
                                                 window_hours=2.0, window_start_local_hour=local_h[w0] - 0.25,
                                                 mean_temperature_c=temp, days_since_last_offer=30.0, rng=rng)
                         bandit.update(choice["x"], resp.verified_kwh)
-                        last_offer[hid] = d
-                        a = engagement[hid]
-                        a["offers"] += 1
-                        a["replied"] += int(resp.accepted)
-                        a["kwh"] += resp.verified_kwh
+                        last_offer.setdefault(hid, []).append(d)
+                        record_response(engagement[hid], choice["level"], resp)
                         m_dr["offers"] += 1
+                        key = str(int(choice["level"]))
+                        m_dr["offered_rs"][key] = m_dr["offered_rs"].get(key, 0) + 1
+                        pk = f'{hh["persona"].iat[i]}@{key}'
+                        bp = m_dr.setdefault("by_persona", {}).setdefault(pk, [0, 0])
+                        bp[0] += 1
+                        bp[1] += int(resp.accepted and resp.verified_kwh > 0)
                         if resp.accepted and resp.verified_kwh > 0:
                             m_dr["accepted"] += 1
                             m_dr["verified_kwh"] += resp.verified_kwh
-                            m_dr["incentive_rs"] += choice["level"] * V_RUPEES_PER_KWH * resp.verified_kwh
+                            m_dr["incentive_rs"] += choice["level"]  # flat offer, paid once verified
                             red_kw = resp.verified_kwh / 2.0
+                            m_dr["reduction_kw"] += red_kw
                             dr_red[win, i] += red_kw
                             rb = slice(w0 + DR_WINDOW_INTERVALS, w0 + DR_WINDOW_INTERVALS + REBOUND_INTERVALS)
                             dr_red[rb, i] -= REBOUND_FRACTION * resp.verified_kwh / (REBOUND_INTERVALS * DT_H)
