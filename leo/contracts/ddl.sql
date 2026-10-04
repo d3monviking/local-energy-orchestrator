@@ -239,7 +239,7 @@ CREATE TABLE plan (
   ts_end      TIMESTAMPTZ NOT NULL,
   setpoint_kw DOUBLE PRECISION NOT NULL,   -- + discharge, - charge
   mode        battery_mode_t NOT NULL,
-  planner     TEXT NOT NULL,               -- 'cvx' | 'rules'
+  planner     TEXT NOT NULL,               -- 'cvx' | 'rules' | 'shave'
   reserve_kwh DOUBLE PRECISION NOT NULL,
   approved_at TIMESTAMPTZ,
   approved_by TEXT,
@@ -344,4 +344,24 @@ CREATE TABLE period_revenue (
   backup_fees_paise BIGINT NOT NULL DEFAULT 0,
   alpha             DOUBLE PRECISION NOT NULL DEFAULT 0.6,
   PRIMARY KEY (run_id, period_start)
+);
+
+-- Year-sampled evaluation (eval/sweep.py) and its unit economics
+-- (eval/economics.py). Created on demand by those scripts too.
+CREATE TABLE IF NOT EXISTS eval_sweep (
+    sweep_id   TEXT PRIMARY KEY,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    params     JSONB NOT NULL
+);
+CREATE TABLE IF NOT EXISTS eval_day (
+    sweep_id TEXT NOT NULL REFERENCES eval_sweep(sweep_id) ON DELETE CASCADE,
+    config   TEXT NOT NULL,
+    day      DATE NOT NULL,
+    metrics  JSONB NOT NULL,
+    PRIMARY KEY (sweep_id, config, day)
+);
+CREATE TABLE IF NOT EXISTS eval_economics (
+    sweep_id    TEXT PRIMARY KEY,
+    computed_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    result      JSONB NOT NULL
 );

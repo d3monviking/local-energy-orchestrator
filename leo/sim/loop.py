@@ -49,12 +49,12 @@ from world.pv_truth import assign_pv_truth_params, generate_true_pv
 from world.weather import fetch_scenario_weather, to_15min
 from gateway.network_model import (
     build_pandapower_net, update_household_loads, run_power_flow, detect_violations,
-    compute_phase_limits, get_bus_index,
+    compute_phase_limits, linear_phase_limits, get_bus_index,
 )
 from gateway.forecast.load_model import build_features, FEATURE_COLUMNS, train as train_load_model
 from gateway.forecast.pv_model import unit_pv_output_kw, fit_k, compute_clear_midday_mask, pass0_initial_load_estimate
 from gateway.forecast.run import ForecastInputs, run_day_ahead_plan, approve_plan
-from gateway.orchestrator.live_rules import apply_live_rule
+from gateway.orchestrator.planner_shave import live_setpoint
 from cloud.dr_engine.linucb import LinUCB, choose_level
 from cloud.dr_engine.selection import run_dr_event, ensure_default_consent
 from sim.personas import respond_to_offer
@@ -117,7 +117,8 @@ class ArmState:
 
 
 SOC_MIN, SOC_MAX, BATTERY_EFFICIENCY = 0.15, 0.90, 0.92
-PRE_OUTAGE_SOC_TARGET = 0.90  # §9.3: Pre-outage raises the reserve floor on all three blocks
+PRE_OUTAGE_SOC_TARGET = 0.90  # §9.3: Pre-outage raises the reserve floor on all three blocks (cap)
+PRE_OUTAGE_CUT_HOURS = 1.5     # the announced cut's length, from the DISCOM's notice
 
 
 def bms_step(soc: float, commanded_kw: float, capacity_kwh: float, hours: float = 0.25) -> tuple[float, float]:
@@ -170,7 +171,9 @@ def _dispatch_battery_sync(unit_id: int, setpoint_kw: float, modbus_host: str, m
         await client.connect()
         try:
             await _write_battery_setpoint(client, unit_id, setpoint_kw)
-            await asyncio.sleep(1.3)  # let the mock's physics loop (1s period) tick at least once
+            # SoC comes from bms_step(), not this read, so don't wait 1.3 s for
+            # the mock's physics tick (that alone was ~6 min per recorded day).
+            await asyncio.sleep(0.05)
             telemetry = await _read_battery_telemetry(client, unit_id)
         finally:
             client.close()
@@ -245,6 +248,21 @@ def run_one_day(
 
     state = ArmState()
     root_idx = get_bus_index(net, feeder.root)
+    far_end_idx = {p: get_bus_index(net, b) for p, b in far_end_sensor_bus.items()}
+    bus_by_phase = {p: feeder.household.loc[feeder.household["phase"] == p, "bus_id"].tolist() for p in PHASES}
+    local_hour = ((target_ts.hour + target_ts.minute / 60.0 + IST_OFFSET_HOURS) % 24).to_numpy()
+    dvdp: dict[str, float] = {}
+    bias = {p: 0.0 for p in PHASES}
+    reserve_soc = {p: SOC_MIN for p in PHASES}
+    if pre_outage is not None:
+        from gateway.outage import register_backup_premises
+        backup = register_backup_premises(feeder.household)
+        backup["phase"] = backup["household_id"].map(dict(zip(feeder.household["id"], feeder.household["phase"])))
+        cut_h = PRE_OUTAGE_CUT_HOURS
+        for p in PHASES:
+            need_kwh = 1.5 * float((backup.loc[backup["phase"] == p, "max_current_a"] * nominal_v_ln / 1000.0).sum()) * cut_h
+            cap = next(b["capacity_kwh"] for b in scenario["battery_blocks"] if b["phase"] == p)
+            reserve_soc[p] = min(PRE_OUTAGE_SOC_TARGET, max(SOC_MIN, 0.05 + need_kwh / (cap * BATTERY_EFFICIENCY)))
 
     n_trips = 0
     for i, ts in enumerate(target_ts):
@@ -274,45 +292,54 @@ def run_one_day(
         sgen_indices = []
         dispatch_rows = []
         if leo_enabled and approved_plans is not None:
+            # One pre-dispatch solve stands in for the sensors' latest reading
+            # (busbar CT + voltage, far-end voltage) for all three phases.
+            run_power_flow(net)
+            res = net.res_bus_3ph
             for phase in PHASES:
                 if state.trip_until[phase] is not None:
                     continue
-                plan_iv = approved_plans[phase]["intervals"][i]
-                planned_kw = plan_iv["setpoint_kw"]
+                plan = approved_plans[phase]
+                planned_kw = plan["intervals"][i]["setpoint_kw"]
+                letter = PHASE_LETTER[phase]
+                block = next(b for b in scenario["battery_blocks"] if b["phase"] == phase)
+                cap = block["capacity_kwh"]
+                if phase not in dvdp:
+                    dvdp[phase] = compute_phase_limits(net, feeder.root, phase, v_limit_pct, block["power_kw"]).dv_dp_pu_per_kw
+                limits = linear_phase_limits(net, root_idx, phase, v_limit_pct, block["power_kw"], dvdp[phase])
+                far_end_v = float(res.at[far_end_idx[phase], f"vm_{letter}_pu"]) * nominal_v_ln
+                measured_kw = float(sum(loads.get(b, 0.0) for b in bus_by_phase[phase]))
+                forecast_p50 = np.asarray(plan["forecast_p50_kw"])
 
-                run_power_flow(net)
-                base_viol = detect_violations(net, v_limit_pct)
-                far_end_bus = far_end_sensor_bus.get(phase)
-                far_end_row = base_viol[base_viol["bus_id"] == far_end_bus]
-                far_end_v = float(far_end_row["voltage_v"].iloc[0]) if not far_end_row.empty else nominal_v_ln
-
-                limits = compute_phase_limits(
-                    net, feeder.root, phase, v_limit_pct,
-                    next(b["power_kw"] for b in scenario["battery_blocks"] if b["phase"] == phase),
-                )
-                corrected = apply_live_rule(
-                    planned_kw, far_end_v, nominal_v_ln, v_limit_pct,
-                    limits.max_charge_kw, limits.max_discharge_kw,
-                )
-                setpoint_kw, rule, mode = corrected.setpoint_kw, corrected.rule_triggered, "normal"
-
+                mode = "normal"
                 if pre_outage is not None and pre_outage[0] <= ts < pre_outage[1]:
-                    # Reserve raised: no discharge; charge toward the target,
-                    # but only within the safe charge limit, so pre-charging
-                    # on an already-sagging evening phase can't push it under.
+                    # §9.3 Pre-outage: raise the floor to what the backup
+                    # premises need through the announced cut (+50%), top
+                    # up to it, and keep shaving the peak with the rest.
                     mode = "pre_outage"
-                    if state.soc[phase] < PRE_OUTAGE_SOC_TARGET:
-                        setpoint_kw, rule = -limits.max_charge_kw, "pre_outage_charge"
+                    floor = reserve_soc[phase]
+                    if state.soc[phase] < floor:
+                        setpoint_kw, rule = -limits.max_charge_kw, "pre_outage_reserve"
                     else:
-                        setpoint_kw, rule = 0.0, "pre_outage_hold"
+                        setpoint_kw, rule = live_setpoint(i, measured_kw, forecast_p50, bias[phase], local_hour,
+                                                          state.soc[phase], cap, block["power_kw"], floor, SOC_MAX,
+                                                          BATTERY_EFFICIENCY)
+                else:
+                    setpoint_kw, rule = live_setpoint(i, measured_kw, forecast_p50, bias[phase], local_hour,
+                                                      state.soc[phase], cap, block["power_kw"], SOC_MIN, SOC_MAX,
+                                                      BATTERY_EFFICIENCY)
+                    upper = nominal_v_ln * (1 + v_limit_pct / 100.0)
+                    if far_end_v > upper and state.soc[phase] < SOC_MAX:
+                        setpoint_kw, rule = min(setpoint_kw, -limits.max_charge_kw), "overvoltage"
+                setpoint_kw = float(np.clip(setpoint_kw, -limits.max_charge_kw, limits.max_discharge_kw))
+                bias[phase] = measured_kw - float(forecast_p50[i])
 
-                # Real Modbus round trip (transport + watchdog fidelity) ...
+                # Real Modbus write (transport + watchdog fidelity) ...
                 _dispatch_battery_sync(UNIT_ID_BY_PHASE[phase], setpoint_kw, modbus_host, modbus_port)
                 # ... energy accounting at the recorded interval length.
-                actual_kw, state.soc[phase] = bms_step(state.soc[phase], setpoint_kw, capacity_by_phase[phase])
+                actual_kw, state.soc[phase] = bms_step(state.soc[phase], setpoint_kw, cap)
 
                 if actual_kw != 0:
-                    letter = PHASE_LETTER[phase]
                     idx = pp.create_asymmetric_sgen(net, bus=root_idx, **{f"p_{letter}_mw": actual_kw / 1000.0})
                     sgen_indices.append(idx)
 
@@ -706,8 +733,9 @@ def write_dr_window_events(conn, run_id: str, dr_result: dict, window_start, win
     cur.close()
 
 
-def build_true_load(feeder, scenario: dict, weather_15min: pd.DataFrame, rng: np.random.Generator):
-    _, _, ownership = assign_ownership_and_truth(feeder.household, scenario["households"]["shares"], rng)
+def build_true_load(feeder, scenario: dict, weather_15min: pd.DataFrame, rng: np.random.Generator,
+                    return_truth: bool = False):
+    _, truth, ownership = assign_ownership_and_truth(feeder.household, scenario["households"]["shares"], rng)
     true_load = generate_true_load(feeder.household, ownership, weather_15min, rng)
     pv_truth = assign_pv_truth_params(feeder.household, rng)
     lat, lon = scenario["neighbourhood"]["centroid_lat"], scenario["neighbourhood"]["centroid_lon"]
@@ -718,10 +746,16 @@ def build_true_load(feeder, scenario: dict, weather_15min: pd.DataFrame, rng: np
     # midday undervoltage that doesn't exist and made overvoltage impossible.
     net_load = true_load - pv_by_hh[true_load.columns].fillna(0.0)
     net_load.columns = feeder.household.set_index("id").loc[net_load.columns, "bus_id"]
+    if return_truth:
+        return true_load, true_pv, net_load, truth.merge(ownership, on="household_id")
     return true_load, true_pv, net_load
 
 
-def train_forecast_inputs(feeder, scenario, weather_15min, true_load, true_pv) -> ForecastInputs:
+def train_forecast_inputs(feeder, scenario, weather_15min, true_load, true_pv,
+                          exclude: list[tuple[pd.Timestamp, pd.Timestamp]] | None = None) -> ForecastInputs:
+    """`exclude`: [start, end) spans whose rows are dropped from the load
+    model's training set, so a multi-day evaluation (eval/sweep.py) never
+    scores a forecast on days the model was fitted to."""
     import holidays as pyholidays
 
     pv_hh = feeder.household[feeder.household["has_pv"]]
@@ -771,7 +805,10 @@ def train_forecast_inputs(feeder, scenario, weather_15min, true_load, true_pv) -
             static_features=static_features[phase], holidays_set=holidays_set, festivals_set=set(),
         )
         feats["gross_kw"] = history.set_index("ts_end")["gross_kw"].reindex(feats["ts_end"]).to_numpy()
-        train_rows.append(feats.dropna(subset=FEATURE_COLUMNS + ["gross_kw"]))
+        feats = feats.dropna(subset=FEATURE_COLUMNS + ["gross_kw"])
+        for lo, hi in exclude or []:
+            feats = feats[~((feats["ts_end"] >= lo) & (feats["ts_end"] < hi))]
+        train_rows.append(feats)
     load_model = train_load_model(pd.concat(train_rows, ignore_index=True))
 
     return ForecastInputs(load_model=load_model, pv_k=k, weather_15min=weather_15min, lat=lat, lon=lon), \
@@ -828,11 +865,24 @@ def main() -> None:
         for p, plan in plans.items()
     }
 
-    worst_phase = max(PHASES, key=lambda p: sum(iv["setpoint_kw"] for iv in plans[p]["intervals"] if iv["setpoint_kw"] > 0))
-    # IST -> UTC: subtract 5:30. DR_WINDOW_IST is (19, 21) -> 13:30-15:30 UTC.
-    window_start = pd.Timestamp(plan_date, tz="UTC") + pd.Timedelta(hours=DR_WINDOW_IST[0] - 5, minutes=-30)
-    window_end = window_start + pd.Timedelta(hours=DR_WINDOW_IST[1] - DR_WINDOW_IST[0])
-    target_kw = max(iv["setpoint_kw"] for iv in plans[worst_phase]["intervals"])
+    # DR covers what the battery plan can't: the forecast load still above
+    # the transformer's per-phase rating after planned discharge, in the
+    # 2-hour evening window where that residual is largest (same rule as
+    # eval/sweep.py).
+    rating_kw_phase = nb["transformer_kva"] / 3.0 * 0.95
+    day_ts = pd.date_range(pd.Timestamp(plan_date, tz="UTC") + pd.Timedelta(minutes=15), periods=96, freq="15min")
+    day_local_h = ((day_ts.hour + day_ts.minute / 60.0 + 5.5) % 24).to_numpy()
+    excess = {p: np.clip(np.array(plans[p]["forecast_p50_kw"])
+                         - np.clip([iv["setpoint_kw"] for iv in plans[p]["intervals"]], 0, None) - rating_kw_phase, 0, None)
+              for p in PHASES}
+    total_excess = sum(excess.values())
+    starts = [i for i in range(96 - 8) if 17.0 <= day_local_h[i] - 0.25 < 21.0]
+    w0 = max(starts, key=lambda i: total_excess[i:i + 8].sum())
+    worst_phase = max(PHASES, key=lambda p: excess[p][w0:w0 + 8].sum())
+    window_start = day_ts[w0] - pd.Timedelta(minutes=15)
+    window_end = window_start + pd.Timedelta(hours=2)
+    dr_local_start = float(day_local_h[w0] - 0.25)
+    target_kw = max(0.5, float(excess[worst_phase][w0:w0 + 8].max()))
     mean_temp_c = float(weather_15min.loc[
         (weather_15min["ts"] >= window_start) & (weather_15min["ts"] < window_end), "temperature_c"
     ].mean())
@@ -964,7 +1014,7 @@ def main() -> None:
     print("running the real DR event (selection + SMS send)...")
     sms_url = os.environ.get("SMS_URL", "http://localhost:8012")
     dr_result = run_dr_event(
-        conn, bandit, run_id="normal", event_id=f"EVT-{plan_date.isoformat()}-{worst_phase}-{DR_WINDOW_IST[0]}00",
+        conn, bandit, run_id="normal", event_id=f"EVT-{plan_date.isoformat()}-{worst_phase}-{int(dr_local_start):02d}{int(round(dr_local_start % 1 * 60)):02d}",
         phase=worst_phase, window_start=window_start.to_pydatetime(), window_end=window_end.to_pydatetime(),
         target_kw=target_kw, v_rupees_per_kwh=V_RUPEES_PER_KWH, event_date=plan_date,
         forecast_temp_c=mean_temp_c, hours_notice=20.0, sms_url=sms_url, rng=rng,
@@ -996,7 +1046,7 @@ def main() -> None:
 
         response = respond_to_offer(
             persona, offer["level"], window_baseline_kw=window_baseline_kw,
-            window_hours=window_hours, window_start_local_hour=DR_WINDOW_IST[0],
+            window_hours=window_hours, window_start_local_hour=dr_local_start,
             mean_temperature_c=mean_temp_c, days_since_last_offer=30, rng=rng,
         )
         if response.accepted:

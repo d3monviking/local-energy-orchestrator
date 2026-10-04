@@ -483,6 +483,14 @@ def build_feeder(
         on="bus_id",
     )
 
+    # Premises the operator wires to its backup circuit (scenario.yaml
+    # backup_circuit). Applied after every random draw, so the rest of the
+    # world is identical with or without it.
+    for p in scenario.get("backup_circuit", {}).get("premises", []):
+        sel = household_df["id"] == p["household_id"]
+        household_df.loc[sel, "critical_class"] = p["critical_class"]
+        household_df.loc[sel, "is_critical"] = True
+
     sensor_df = place_sensors(tree, root, phase_of)
 
     return FeederResult(

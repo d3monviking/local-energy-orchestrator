@@ -316,6 +316,21 @@ class PhaseLimit:
     dv_dp_pu_per_kw: float
 
 
+def linear_phase_limits(net, root_idx: int, phase: str, v_limit_pct: float, inverter_kw: float,
+                        dv_dp_pu_per_kw: float) -> PhaseLimit:
+    """compute_phase_limits() with a known sensitivity: reads the busbar
+    voltage from the power flow the caller already ran (no extra solves)."""
+    letter = PHASE_LETTER[phase]
+    v_base = float(net.res_bus_3ph.loc[root_idx, f"vm_{letter}_pu"])
+    dv = max(dv_dp_pu_per_kw, 1e-9)
+    return PhaseLimit(
+        phase=phase,
+        max_charge_kw=float(np.clip((v_base - (1.0 - v_limit_pct / 100.0)) / dv, 0.0, inverter_kw)),
+        max_discharge_kw=float(np.clip((1.0 + v_limit_pct / 100.0 - v_base) / dv, 0.0, inverter_kw)),
+        v_base_pu=v_base, dv_dp_pu_per_kw=dv_dp_pu_per_kw,
+    )
+
+
 def compute_phase_limits(
     net,
     battery_bus_id: str,

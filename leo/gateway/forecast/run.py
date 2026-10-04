@@ -47,9 +47,12 @@ from gateway.forecast.load_model import LoadModel, build_features, FEATURE_COLUM
 from gateway.forecast.pv_model import unit_pv_output_kw
 from gateway.network_model import (
     build_pandapower_net, update_household_loads, run_power_flow, detect_violations,
-    compute_phase_limits, get_bus_index,
+    compute_phase_limits, linear_phase_limits, get_bus_index,
 )
-from gateway.orchestrator.planner_rules import IntervalForecast, plan_rule_based
+from gateway.orchestrator.planner_rules import IntervalForecast
+from gateway.orchestrator.planner_shave import plan_day
+
+SOC_MIN, SOC_MAX, EFFICIENCY = 0.15, 0.90, 0.92
 
 PHASES = ["R", "Y", "B"]
 
@@ -174,14 +177,13 @@ def run_day_ahead_plan(
             phase, target_ts, run_time, inputs, gross_load_history_by_phase[phase],
             static_features_by_phase[phase], holidays_set, festivals_set,
         )
-        if artifacts is not None:
-            quantiles_by_phase[phase] = {
-                q: forecast_phase_net_load_kw(
-                    phase, target_ts, run_time, inputs, gross_load_history_by_phase[phase],
-                    static_features_by_phase[phase], holidays_set, festivals_set, quantile=q,
-                )
-                for q in ("p10", "p50", "p90")
-            }
+        quantiles_by_phase[phase] = {
+            q: forecast_phase_net_load_kw(
+                phase, target_ts, run_time, inputs, gross_load_history_by_phase[phase],
+                static_features_by_phase[phase], holidays_set, festivals_set, quantile=q,
+            )
+            for q in ("p10", "p50", "p90")
+        }
     predicted_rows: list[dict] = []
     interval_rows: list[dict] = []
 
@@ -190,6 +192,8 @@ def run_day_ahead_plan(
 
     intervals_by_phase = {p: [] for p in PHASES}
     battery_by_phase = {b["phase"]: b for b in battery_blocks}
+    root_idx = get_bus_index(net, feeder.root)
+    dvdp_by_phase: dict[str, float] = {}
 
     # Per-household PV forecast (unit output x calibrated k x that home's
     # own kWp). Net load is disaggregated as gross-by-sanctioned-load MINUS
@@ -227,9 +231,16 @@ def run_day_ahead_plan(
             dev = (phase_v["voltage_v"] - nominal_v_ln) / nominal_v_ln if not phase_v.empty else None
             severity = float((-dev - v_limit_pct / 100.0).clip(lower=0).max()) if dev is not None else 0.0
             over_severity = float((dev - v_limit_pct / 100.0).clip(lower=0).max()) if dev is not None else 0.0
-            limits = compute_phase_limits(
-                net, feeder.root, phase, v_limit_pct, battery_by_phase[phase]["power_kw"]
-            )
+            # Safe limits from the busbar voltage and its sensitivity to
+            # battery power. compute_phase_limits() is the same one-probe
+            # linearisation; the sensitivity is set by the transformer's
+            # impedance and barely moves through the day, so probe it once
+            # per phase instead of 3 solves x 96 intervals x 3 phases.
+            if phase not in dvdp_by_phase:
+                dvdp_by_phase[phase] = compute_phase_limits(
+                    net, feeder.root, phase, v_limit_pct, battery_by_phase[phase]["power_kw"]).dv_dp_pu_per_kw
+            limits = linear_phase_limits(net, root_idx, phase, v_limit_pct, battery_by_phase[phase]["power_kw"],
+                                         dvdp_by_phase[phase])
             if artifacts is not None:
                 root_row = phase_v[phase_v["bus_id"] == str(feeder.root)]
                 wx = inputs.weather_15min[inputs.weather_15min["ts"] == ts]
@@ -251,18 +262,29 @@ def run_day_ahead_plan(
                 over_severity=over_severity,
             ))
 
+    # Peak-shaving plan on the P50 forecast (gateway/orchestrator/
+    # planner_shave.py): fill the midday trough, flatten the evening peak.
+    # The violation severities above still drive the event explanations;
+    # the battery's job is the top of the load curve, which is where both
+    # the overload and the worst voltage sit.
+    local_hour = ((target_ts.hour + target_ts.minute / 60.0 + 5.5) % 24).to_numpy()
     plans = {}
     for phase in PHASES:
         block = battery_by_phase[phase]
-        reserve_floor_kwh = 0.15 * block["capacity_kwh"]
-        plan_intervals = plan_rule_based(
-            capacity_kwh=block["capacity_kwh"], power_kw=block["power_kw"], soc_max=0.90,
-            efficiency=0.92, intervals=intervals_by_phase[phase],
-            reserve_floor_kwh=reserve_floor_kwh, initial_soc_frac=initial_soc_frac,
-        )
+        reserve_floor_kwh = SOC_MIN * block["capacity_kwh"]
+        p50 = quantiles_by_phase[phase]["p50"].to_numpy()
+        setpoints = plan_day(p50, local_hour, block["capacity_kwh"], block["power_kw"], initial_soc_frac,
+                             SOC_MIN, SOC_MAX, EFFICIENCY)
+        soc, plan_intervals = initial_soc_frac, []
+        for ts, sp, iv in zip(target_ts, setpoints, intervals_by_phase[phase]):
+            sp = float(np.clip(sp, -iv.max_charge_kw, iv.max_discharge_kw))
+            soc -= (sp / EFFICIENCY if sp > 0 else sp * EFFICIENCY) * 0.25 / block["capacity_kwh"]
+            plan_intervals.append({"ts_end": ts.strftime("%Y-%m-%dT%H:%M:%SZ"), "setpoint_kw": round(sp, 3),
+                                   "mode": "normal", "soc_target": round(soc, 4)})
         plans[phase] = {
-            "run_id": run_id, "plan_date": plan_date.isoformat(), "phase": phase, "planner": "rules",
+            "run_id": run_id, "plan_date": plan_date.isoformat(), "phase": phase, "planner": "shave",
             "intervals": plan_intervals, "reserve_floor_kwh": reserve_floor_kwh,
+            "forecast_p50_kw": [round(float(x), 3) for x in p50],
             "status": "draft", "approved_by": None, "approved_at": None,
         }
     if artifacts is not None:

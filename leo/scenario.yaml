@@ -40,3 +40,25 @@ outages:
 
 sensors:
   count: 6   # 3 busbar (one per phase) + 3 far-end (one per phase)
+
+# Premises wired to the operator's backup circuit (Architecture §C3), in
+# addition to any household registered critical in the feeder (HH-056,
+# the clinic). Two per phase so every block has premises to protect.
+# (verify) which premises a real neighbourhood would register.
+backup_circuit:
+  premises:
+    - {household_id: HH-136, critical_class: water}       # Y, borewell pump for the lane
+    - {household_id: HH-083, critical_class: education}   # B, tuition centre
+    - {household_id: HH-069, critical_class: livelihood}  # R, shop
+    - {household_id: HH-097, critical_class: livelihood}  # Y, shop
+    - {household_id: HH-014, critical_class: livelihood}  # B, shop
+
+# Scheduled DISCOM load shedding on the evening ramp when the state is
+# short of power (§14). (verify) frequency against BESCOM's published
+# schedules; summer 2024 saw rostered evening cuts in rural Karnataka.
+load_shedding:
+  months: [3, 4, 5]
+  weekdays_in_sample: [2, 5]   # two cuts in each sampled summer week
+  start_ist: "19:30"
+  duration_min: 90
+  notice_hours: 5

@@ -1,0 +1,99 @@
+# Unit-economics assumptions, read by eval/economics.py.
+#
+# Every figure here is a PLACEHOLDER until replaced from a source. Each
+# carries `verify:` with where to look. Physical quantities (kWh shifted,
+# peak cut, transformer ageing, backup minutes) come from the simulation
+# sweep (eval/sweep.py), never from this file.
+#
+# Currency: Indian rupees. Energy: kWh at the meter. Per-year unless noted.
+
+neighbourhood:
+  households: 150
+  transformer_kva: 100
+  power_factor: 0.95
+
+operator:
+  # Share of realised revenue paid out to households (Architecture §12.2).
+  # eval/economics.py also reports the highest alpha at which the
+  # operator still recovers its capital within finance.target_payback_years.
+  alpha: 0.3
+
+operating_model:
+  # One local operator (cooperative / NGO / SHG federation, registered as
+  # a DF aggregator) runs LEO on a CLUSTER of distribution transformers -
+  # e.g. one gram panchayat or one BESCOM O&M section. Technician, cloud,
+  # M&V and registration are shared across the cluster; one LoRaWAN
+  # gateway covers several DTs (2-5 km rural range).
+  dts_per_operator: 20                # verify: DTs per BESCOM O&M section / gram panchayat
+  dts_per_lora_gateway: 5
+
+capex:
+  battery_rs_per_kwh: 9000            # verify: repurposed EV packs (LFP) incl. BMS + rack; Indian second-life vendors (e.g. Lohum, Nunam, BatX)
+  inverter_rs_per_kw: 9000            # verify: single-phase hybrid inverter with backup port (7.5 kW class)
+  voltage_sensor_rs: 6000             # verify: LoRaWAN voltage/outage logger, x6
+  busbar_ct_rs: 1500                  # verify: split-core CT add-on for the 3 busbar sensors
+  lora_gateway_rs: 40000              # verify: outdoor LoRaWAN gateway
+  edge_gateway_rs: 25000              # verify: industrial SBC + enclosure + UPS
+  backup_circuit_per_premise_rs: 15000  # verify: cabling, changeover, premise meter (Rishabh/ABB class)
+  install_commissioning_pct: 12       # verify: % of hardware
+  registration_setup_rs: 200000       # verify: aggregator registration, M&V onboarding (KERC DF regs) - whole cluster
+
+opex:
+  technician_rs_per_month: 20000      # verify: one full-time technician for the whole cluster (Karnataka minimum wage + travel)
+  cloud_connectivity_rs_per_month: 5000  # verify: whole cluster; plus per-DT SIM below
+  sim_data_rs_per_dt_month: 150        # verify: edge gateway mobile data
+  sms_rs_per_message: 0.20            # verify: transactional SMS/IVR rates (DLT-registered)
+  alerts_per_household_per_year: 24   # load-shedding notices, outage updates
+  insurance_pct_of_capex: 1.5         # verify
+  maintenance_pct_of_capex: 2.0       # verify
+  mv_agency_rs_per_year: 100000       # verify: empanelled independent M&V agency, whole cluster (KERC DF regs require it)
+
+battery:
+  cycle_life_efc: 2500                # verify: second-life LFP, equivalent full cycles to end-of-second-life
+  calendar_life_years: 7              # verify
+  usable_fraction: 0.75               # SoC window 0.15-0.90 used by LEO
+
+tariffs:
+  retail_rs_per_kwh: 7.0              # verify: BESCOM LT domestic average energy charge (KERC tariff order)
+  tod_peak_surcharge_rs: 1.0          # verify: KERC ToD, peak 18:00-22:00
+  tod_solar_rebate_rs: 1.0            # verify: KERC ToD, solar hours 09:00-17:00
+  peak_hours_ist: [18, 22]
+  solar_hours_ist: [9, 17]
+  feed_in_tariff_rs_per_kwh: 2.5      # verify: KERC rooftop net/gross metering tariff
+
+dfpo:
+  # What the DISCOM pays the aggregator per kWh of verified flexibility
+  # (battery discharge in the DISCOM's peak window + DR verified kWh).
+  payment_rs_per_kwh: 6.0             # verify: KERC DF/DSM Regulations 2026, DISCOM DF programme rates; MERC 2024 for comparison
+  # What the DISCOM is charged per kWh of shortfall against its DFPO target.
+  penalty_rs_per_kwh_shortfall: 8.0   # verify: KERC DF/DSM Regulations 2026 penalty clause
+  # If the programme pays for capacity instead of (or as well as) energy:
+  # Rs per kW of verified evening-peak reduction per year.
+  capacity_rs_per_kw_year: 0          # verify: DISCOM DF programme design
+
+discom:
+  peak_purchase_rs_per_kwh: 9.5       # verify: IEX DAM/RTM 18:00-23:00 average, summer and annual
+  solar_hours_purchase_rs_per_kwh: 3.0  # verify: IEX DAM 10:00-16:00 average
+  avg_purchase_rs_per_kwh: 5.5        # verify: BESCOM average power purchase cost (APPC)
+  dt_replacement_rs: 350000           # verify: 100 kVA DT supply + installation (BESCOM cost data / SR rates)
+  dt_normal_life_hours: 180000        # IEEE C57.91 normal insulation life (20.5 years at 110 C hot-spot)
+  # Without LEO this DT is past its rating every evening, so the DISCOM
+  # must augment it. If LEO holds the average evening peak inside the
+  # rating, augmentation is deferred until load growth uses up the margin.
+  # Counted INSTEAD of failures avoided, never as well.
+  dt_augmentation_rs: 600000          # verify: 100 -> 250 kVA DT + LT line works (BESCOM schedule of rates / RDSS DPRs)
+  load_growth_pct_per_year: 3         # verify: BESCOM LT domestic load growth
+  dt_failure_repair_hours: 48         # verify: KERC Standards of Performance, rural DT replacement time
+  value_of_lost_load_rs_per_kwh: 40   # verify: Indian VoLL studies (CEA / Prayas); used for outage cost only
+
+backup:
+  fee_rs_per_kwh: 12.0                # verify: vs diesel genset ~Rs 25-30/kWh and home inverter cost
+  subscription_rs_per_premise_month: 150  # verify: member-agreed
+
+finance:
+  # Share of upfront capital covered by a grant: MNRE's VGF for battery
+  # storage, CSR funds, or DISCOM co-funding from RDSS loss-reduction works.
+  capital_grant_pct: 0                # verify: eligibility of community-scale BESS for VGF / CSR
+  discount_rate: 0.10
+  horizon_years: 10
+  target_payback_years: 5
