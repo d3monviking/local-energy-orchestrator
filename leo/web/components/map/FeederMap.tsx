@@ -88,6 +88,44 @@ function voltageColor(v: number, nominal: number, limitPct: number): [number, nu
   return [47, 191, 113]; // green: healthy
 }
 
+/** The transformer, all 3 battery blocks, and all 3 busbar sensors
+ * share one lon/lat (the DT site — electrically accurate, confirmed in
+ * api.py's own comment, but 7 markers stacked on one pixel means only
+ * the topmost ever renders). Display-only fix: keep the transformer
+ * anchored at the true point (lines terminate there) and arrange
+ * everything else that shares its coordinate in a small ring around
+ * it, so each is its own visible, hoverable marker. */
+function fanOutTransformerSite(
+  features: GeoJSON.Feature<GeoJSON.Geometry, FeederProperties>[]
+): GeoJSON.Feature<GeoJSON.Geometry, FeederProperties>[] {
+  const byCoord = new Map<string, GeoJSON.Feature<GeoJSON.Geometry, FeederProperties>[]>();
+  for (const f of features) {
+    const [lon, lat] = (f.geometry as GeoJSON.Point).coordinates;
+    const key = `${lon.toFixed(7)},${lat.toFixed(7)}`;
+    (byCoord.get(key) ?? byCoord.set(key, []).get(key)!).push(f);
+  }
+  const RING_DEG = 0.00005; // ~5.5m at this latitude — distinct markers, still visually "at the DT"
+  const out: GeoJSON.Feature<GeoJSON.Geometry, FeederProperties>[] = [];
+  for (const group of byCoord.values()) {
+    if (group.length === 1) {
+      out.push(group[0]);
+      continue;
+    }
+    const transformer = group.find((f) => f.properties.feature_type === "transformer");
+    const orbiting = group.filter((f) => f !== transformer);
+    if (transformer) out.push(transformer);
+    const [lon, lat] = (group[0].geometry as GeoJSON.Point).coordinates;
+    orbiting.forEach((f, i) => {
+      const angle = (2 * Math.PI * i) / orbiting.length - Math.PI / 2;
+      out.push({
+        ...f,
+        geometry: { type: "Point", coordinates: [lon + RING_DEG * Math.cos(angle), lat + RING_DEG * Math.sin(angle)] },
+      });
+    });
+  }
+  return out;
+}
+
 export default function FeederMap({
   dtId,
   runId,
@@ -194,7 +232,7 @@ export default function FeederMap({
     if (!data) return [tileLayer];
 
     const lineFeatures = data.features.filter((f) => f.geometry.type === "LineString");
-    const pointFeatures = data.features.filter((f) => f.geometry.type === "Point");
+    const pointFeatures = fanOutTransformerSite(data.features.filter((f) => f.geometry.type === "Point"));
 
     const feederLines = new GeoJsonLayer({
       id: "feeder-lines",
@@ -285,6 +323,19 @@ export default function FeederMap({
         <span className="flex items-center gap-1.5">
           <span className="inline-block w-2 h-2 rounded-full border border-[#3ba9ff]" style={{ background: "transparent" }} />
           on backup power (outage run)
+        </span>
+        <div className="border-t border-white/20 my-0.5" />
+        <span className="flex items-center gap-1.5">
+          <span className="inline-block w-2.5 h-2.5 rounded-full" style={{ background: "rgb(230,237,243)" }} />
+          transformer (DT site)
+        </span>
+        <span className="flex items-center gap-1.5">
+          <span className="inline-block w-2 h-2 rounded-full" style={{ background: "rgb(59,169,255)" }} />
+          battery block (one per phase, orbiting the DT)
+        </span>
+        <span className="flex items-center gap-1.5">
+          <span className="inline-block w-1.5 h-1.5 rounded-full" style={{ background: "rgb(155,127,224)" }} />
+          sensor (busbar/far-end, per phase)
         </span>
       </div>
 
