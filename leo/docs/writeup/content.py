@@ -181,7 +181,7 @@ revenue; there is no penalty anywhere in the system. Section 12 details the mode
 """))
 
     # ----------------------------------------------------- 5 Features & journeys
-    out.append(("Key features and user journeys", f"""
+    out.append(("Key features, user journeys and applications", f"""
 <h2>5.1 Key features</h2>
 {table(["Feature", "What it does", "Why it matters"], [
         ["Day-ahead stress forecast", "Per-phase P10/P50/P90 load and solar, run through a three-phase network model", "Overloads and voltage problems are predicted a day early, with the reason (load, temperature, irradiance)"],
@@ -215,6 +215,35 @@ circuit by priority; at 21:10 they are re-transferred to the grid in batches.</p
 <h3>DISCOM engineer</h3>
 <p>The DISCOM dashboard shows an action queue — forecast undervoltage on phase B with a recommended tap raise, an outage with its
 scope — each with acknowledge/dispatch/resolve states and machine-readable JSON, plus verified kW for DFPO reporting.</p>
+
+<h2>5.3 The applications we built</h2>
+<p>LEO has three user-facing applications: one web app for the operator and the DISCOM, a citizen app, and SMS/IVR for households
+without smartphones. All are role-based (operator, DISCOM, household), read from the same backend, and run in the prototype today. The
+operator console was designed around one question: <i>what did LEO see coming, what did it do and why, and what actually happened?</i></p>
+{table(["Screen", "Who", "What it shows and does"], [
+        ["Map control room", "Operator", "deck.gl map over real satellite imagery of the neighbourhood: feeder lines coloured by voltage, the transformer, battery blocks, sensors and backup premises. A timeline replays any recorded day, with a toggle between what happened and what was forecast the day before. Banners state the current situation in plain words."],
+        ["What LEO predicted", "Operator", "Day-ahead forecast of transformer loading (forecast vs actual) and one card per predicted event: when it was predicted, why (load, temperature, irradiance), LEO's planned response, and the outcome once the timeline reaches it. Events the forecast missed are flagged."],
+        ["What LEO did, and why", "Operator", "Time-ordered action log — forecast issued, plan approved, DR offers, pump shift, AC event, battery charge/discharge, mode changes, outages, escalations — each with its reason, filterable, click-to-seek on the timeline."],
+        ["Scenario runs", "Operator", "Peak day with and without LEO, announced load shedding, unplanned outage, and a sunny surplus day with and without LEO; a glossary explains every term."],
+        ["Plan review", "Operator", "Per-phase charge/discharge schedule and the DR offers for tomorrow; the operator approves before anything is dispatched."],
+        ["Live operations", "Operator", "Battery state of charge and far-end voltage per phase."],
+        ["DR events", "Operator", "Offers sent, accepted and held out, response rate and offers by amount (₹0/25/50/100)."],
+        ["Settlement and members", "Operator", "Daily ledger by stream with the payout scaling factor and per-household drill-down; outage-day backup fees; member registry (sanctioned load, business, critical premise)."],
+        ["Impact and economics", "Operator, DISCOM", "Section 11 and 13 results for every configuration: reliability against the baseline, monthly charts, who gains what, the deal zone, sensitivity and the assumptions register."],
+        ["Action queue", "DISCOM", "Recommendations (tap-change raise, review inverter settings, outage scope) with time window, phase, evidence and machine-readable JSON; states open → acknowledged → dispatched → resolved."],
+        ["Reporting", "DISCOM", "Verified flexibility against the random holdout, DFPO progress, registered critical premises, and a planning insight on recurring stress."],
+        ["Home, Offer, Earnings", "Household", "Current earnings and the latest offer in plain language (“Earn ₹50 if you switch off your cooler or pump 7–9 pm tonight”); settled payments by stream (DR incentive, surplus absorption, discharge rebate, backup fee)."],
+        ["Usage", "Household", "15-minute import and export, explicitly labelled “last updated yesterday” because meter data arrives a day late."],
+        ["Consent", "Household", "Per-purpose, revocable consent: meter-data access, DR offers, critical-premise disclosure, sensor hosting (DPDP Act)."],
+        ["Outage and Community", "Household", "Backup energy received during an outage (for registered premises); neighbourhood totals — total paid, battery status, outage minutes protected."],
+    ], "User-facing applications built in the prototype.")}
+<p><b>Inclusion.</b> The app and SMS/IVR share one backend path for offers and responses. In the pilot, enrolment, consent, offers,
+earnings, load-shedding and restoration alerts, outage reporting and STOP are designed to work over DLT-registered SMS and an IVR in
+Kannada, Hindi and English, so households without smartphones are not excluded{cite('arch','trai')}. The prototype sends offers and
+alerts through a mock SMS service; the IVR is designed but not built.</p>
+<p><b>Technology.</b> Next.js 15 (App Router) with React 19 and Tailwind CSS 4; a deck.gl 9 map{cite('deckgl')}; a FastAPI service over
+PostgreSQL for all data; role-based access enforced at the route level; everything packaged with Docker Compose alongside the mock
+field devices. The prototype uses stub logins (operator, DISCOM, household); a pilot uses managed authentication with the same roles.</p>
 """))
 
     # --------------------------------------------------------- 6 Architecture
