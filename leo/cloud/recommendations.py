@@ -21,7 +21,7 @@ import psycopg2.extras
 # Table from System Architecture v3.0 §13 (C13).
 ACTION_BY_ISSUE = {
     "forecast_overload": "rebalance_phase_load",
-    "forecast_undervoltage": "review_inverter_voltage_settings",
+    "forecast_undervoltage": "tap_change_raise",  # §13: "Evening undervoltage -> raise tap"
     "forecast_overvoltage": "review_inverter_voltage_settings",
     "recurring_phase_imbalance": "rebalance_phase_load",
     "transformer_near_rating": "upgrade_planning",
@@ -182,7 +182,10 @@ if __name__ == "__main__":
         dbname=os.environ.get("POSTGRES_DB", "leo"),
     )
     dt_id = "DT-0417"
-    nominal_v_ln = 230.0
+    _cur = conn.cursor()
+    _cur.execute("SELECT nominal_v_ln FROM neighbourhood WHERE dt_id = %s", (dt_id,))
+    nominal_v_ln = float(_cur.fetchone()[0])  # 250 in this scenario; a hardcoded 230 mislabelled undervoltage as overvoltage
+    _cur.close()
 
     for run_id in ("normal", "outage"):
         cur = conn.cursor()

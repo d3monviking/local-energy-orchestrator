@@ -30,8 +30,8 @@ const EVENT_KIND_MAP: Record<string, TimelineEventKind> = {
 
 const RUN_LABEL: Record<string, string> = { normal: "With LEO", baseline: "Without LEO", outage: "Outage replay" };
 const RUN_EXPLAINER: Record<string, string> = {
-  normal: "The battery dispatches per the approved day-ahead plan and 58 households got an SMS DR offer. Phase R's overvoltage window shrinks to 11:30–15:00 UTC (17:00–20:30 IST) — 3.5 hours — versus 5.5 hours without LEO.",
-  baseline: "Identical day, identical households — battery and DR both disabled. Phase R overvoltage runs 10:30–16:00 UTC, two hours longer than with LEO. Phases Y and B are nearly unchanged either way: LEO's battery and DR can't reach them, which is exactly why there's an open DISCOM recommendation on Phase Y.",
+  normal: "Peak-demand day on an undersized 100 kVA transformer (150 homes, 250V nominal, ±6% limit). Voltage sags below the floor under heavy load. LEO discharges the three batteries per the approved plan and sends SMS DR offers on the worst phase (R). Phase R's undervoltage shrinks from 5.5h to 3.5h (17:00–20:30 IST). Phases Y and B barely move: each battery only has 5.25 kWh usable and empties it, can't recharge mid-day because those phases are already under the floor from 10:00 IST, and gets no DR — a ~11h, 25–33V gap is beyond local fixing, so it's escalated to the DISCOM as a tap-raise recommendation.",
+  baseline: "Identical day, identical households, battery and DR disabled. Phase R undervoltage runs 16:00–21:30 IST — two hours longer than with LEO. Y and B look almost the same as With LEO, because LEO's local resources were too small to change them either.",
   outage: "Same day, an unplanned 90-minute upstream outage at 14:10 UTC (19:40 IST). Sensors go dark (no readings, not zero voltage), inverters anti-island (disconnect from the dead grid for safety), the backup circuit energises the one registered critical premise, and restoration staggers back on in batches rather than all at once.",
 };
 const PHASES = ["R", "Y", "B"] as const;
@@ -72,6 +72,17 @@ export default function OperatorHome() {
   const [drEvents, setDrEvents] = useState<DrEvent[]>([]);
   const [recs, setRecs] = useState<Recommendation[]>([]);
   const [violatingCount, setViolatingCount] = useState(0);
+  // The DB's actual nominal is 250V, not the 230 a hardcoded fallback
+  // would assume (confirmed in violation_episodes' server fix) - read
+  // from the same feeder fetch FeederMap already makes, not guessed.
+  const [nominalV, setNominalV] = useState(230);
+
+  useEffect(() => {
+    fetch(`${CLOUD_API_URL}/api/feeder/${DT_ID}`)
+      .then((r) => r.json())
+      .then((d: { properties: { nominal_v_ln: number } }) => setNominalV(d.properties.nominal_v_ln))
+      .catch(() => {});
+  }, []);
 
   const loadRuns = () => {
     setRunsError(false);
@@ -212,7 +223,7 @@ export default function OperatorHome() {
           {activeEpisodes.map((e) => (
             <span key={e.phase}>
               Phase {e.phase} {e.kind} — {e.worst_voltage_v}V (
-              {e.deviation_v > 0 ? "+" : ""}{e.deviation_v}V off nominal), since {fmtTime(e.start_ts)} IST
+              {e.kind === "undervoltage" ? "−" : "+"}{e.deviation_v}V vs {nominalV}V nominal), since {fmtTime(e.start_ts)} IST
             </span>
           ))}
           <span className="ml-auto text-[var(--leo-text-dim)]">{violatingCount} buses affected right now · see Actions →</span>
@@ -271,7 +282,7 @@ export default function OperatorHome() {
           {PHASES.map((p) => {
             const v = liveVoltage[p];
             const d = liveDispatch[p];
-            const violating = v && Math.abs(v.voltage_v - 230) / 230 > 0.06;
+            const violating = v && Math.abs(v.voltage_v - nominalV) / nominalV > 0.06;
             return (
               <div
                 key={p}

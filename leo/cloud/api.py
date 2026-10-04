@@ -75,7 +75,7 @@ async def feeder_geojson(dt_id: str) -> dict:
     """
     async with pool.acquire() as conn:
         nb = await conn.fetchrow(
-            "SELECT id, name, centroid_lat, centroid_lon FROM neighbourhood WHERE dt_id = $1", dt_id
+            "SELECT id, name, centroid_lat, centroid_lon, nominal_v_ln, v_limit_pct FROM neighbourhood WHERE dt_id = $1", dt_id
         )
         if nb is None:
             raise HTTPException(404, f"no neighbourhood for dt_id {dt_id}")
@@ -197,6 +197,8 @@ async def feeder_geojson(dt_id: str) -> dict:
             "dt_id": dt_id,
             "name": nb["name"],
             "centroid": [nb["centroid_lon"], nb["centroid_lat"]],
+            "nominal_v_ln": nb["nominal_v_ln"],
+            "v_limit_pct": nb["v_limit_pct"],
         },
         "features": features,
     }
@@ -246,7 +248,7 @@ async def network_result_at(run_id: str, ts_end: str) -> dict:
 
 
 @app.get("/api/violation_episodes/{run_id}")
-async def violation_episodes(run_id: str, nominal_v_ln: float = 230.0) -> list[dict]:
+async def violation_episodes(run_id: str) -> list[dict]:
     """Per-phase voltage violations as contiguous episodes (start/end,
     worst voltage, over/under), not the raw per-15-minute-interval flag
     network_result carries. The operator console's violation banner and
@@ -256,8 +258,15 @@ async def violation_episodes(run_id: str, nominal_v_ln: float = 230.0) -> list[d
     one row per (phase, ts_end) first (several buses can share a
     timestamp), number the violating rows in ts_end order, and rows
     whose (ts_end - row_number * 15min) matches are contiguous.
+
+    nominal_v_ln is read from `neighbourhood`, never a caller-supplied
+    default — confirmed getting this wrong (230 instead of the
+    scenario's real 250) silently flips every episode's over/under
+    label and deviation sign, not just a display rounding error.
     """
     async with pool.acquire() as conn:
+        nb = await conn.fetchrow("SELECT nominal_v_ln FROM neighbourhood LIMIT 1")
+        nominal_v_ln = nb["nominal_v_ln"] if nb else 230.0
         rows = await conn.fetch(
             """
             WITH per_interval AS (

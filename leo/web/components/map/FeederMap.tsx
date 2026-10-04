@@ -41,7 +41,10 @@ type FeederProperties = {
 
 type FeederCollection = {
   type: "FeatureCollection";
-  properties: { dt_id: string; name: string; centroid: [number, number] };
+  properties: {
+    dt_id: string; name: string; centroid: [number, number];
+    nominal_v_ln: number; v_limit_pct: number;
+  };
   features: GeoJSON.Feature<GeoJSON.Geometry, FeederProperties>[];
 };
 
@@ -130,13 +133,20 @@ export default function FeederMap({
   dtId,
   runId,
   ts,
-  nominalV = 230,
-  vLimitPct = 6,
+  nominalV: nominalVProp,
+  vLimitPct: vLimitPctProp,
   backupBusIds,
   liveDispatchByPhase,
   onViolatingCount,
 }: FeederMapProps) {
   const [data, setData] = useState<FeederCollection | null>(null);
+  // Read from the fetched neighbourhood data (DB's actual nominal_v_ln
+  // is 250, not the 230 a prop default would silently assume) -
+  // confirmed getting this wrong flips every violation's over/under
+  // label, not just a cosmetic rounding difference. A caller-supplied
+  // prop only matters before that fetch resolves.
+  const nominalV = data?.properties.nominal_v_ln ?? nominalVProp ?? 230;
+  const vLimitPct = data?.properties.v_limit_pct ?? vLimitPctProp ?? 6;
   const [error, setError] = useState<string | null>(null);
   const [hover, setHover] = useState<PickingInfo | null>(null);
   const [busState, setBusState] = useState<Record<string, BusState> | null>(null);

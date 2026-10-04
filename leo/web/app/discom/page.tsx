@@ -143,8 +143,9 @@ export default function DiscomDashboard() {
         <div className="rounded-lg border border-[var(--leo-border)] bg-[var(--leo-panel)] p-4">
           <p className="text-xs text-[var(--leo-text-dim)]">Planning insight</p>
           <p className="text-sm mt-1">
-            Phase Y shows a recurring overvoltage LEO&apos;s battery can&apos;t fully close locally —
-            see the open recommendation above (review inverter voltage settings).
+            Phase Y sags below the voltage floor (down to ~216V on a 250V nominal) for most of the
+            day — a heavily loaded phase on an undersized transformer. LEO&apos;s 7.5kW battery and DR
+            offers can&apos;t close a gap that size locally; see the open recommendation above (raise tap).
           </p>
         </div>
       </div>
