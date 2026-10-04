@@ -1,5 +1,5 @@
 %% The planning chain; each stage's reason is what the operator console shows.
-flowchart LR
+flowchart TB
     F["<b>1. Forecast</b><br/>P10/P50/P90 load + PV per phase<br/><i>why: weather, calendar, history</i>"]
     N["<b>2. Network model</b><br/>3-phase power flow on the forecast<br/><i>why: which bus, which hour, how far off limit</i>"]
     B["<b>3. Battery plan</b><br/>water-fill: midday trough in, evening peak out<br/><i>why: highest-load intervals cut most</i>"]

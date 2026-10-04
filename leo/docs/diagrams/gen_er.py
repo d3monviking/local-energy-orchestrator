@@ -6,13 +6,15 @@ import re
 from pathlib import Path
 
 ddl = (Path(__file__).resolve().parents[2] / "contracts" / "ddl.sql").read_text()
+import sys
+CORE = None if "--full" in sys.argv else {"run","household","bus","sensor","sensor_reading","meter_interval","forecast","network_result","plan","dispatch","event","mode_transition","dr_event","dr_offer","ledger","period_revenue","recommendation","premise_meter","consent","battery_block"}
 SKIP = {"household_truth"}  # hidden simulator truth, never visible to LEO
-KEEP_EXTRA = 3
+KEEP_EXTRA = 3 if CORE is None else 1
 
 tables = {}
 for m in re.finditer(r"CREATE TABLE(?: IF NOT EXISTS)?\s+(\w+)\s*\((.*?)\n\);", ddl, re.S):
     name, body = m.group(1), m.group(2)
-    if name in SKIP:
+    if name in SKIP or (CORE is not None and name not in CORE):
         continue
     cols, fks, pk = [], [], set()
     for line in body.split("\n"):
@@ -53,5 +55,5 @@ for name, (cols, pk, fks) in tables.items():
             extra += 1
         lines.append(f"        {typ} {col}{(' ' + key) if key else ''}")
     lines.append("    }")
-(Path(__file__).parent / "10_data_model.mmd").write_text("\n".join(lines) + "\n")
+(Path(__file__).parent / ("10_data_model_full.mmd" if CORE is None else "10_data_model.mmd")).write_text("\n".join(lines) + "\n")
 print(f"{len(tables)} tables")
