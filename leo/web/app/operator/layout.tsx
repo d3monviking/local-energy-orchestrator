@@ -12,7 +12,6 @@ export default function OperatorLayout({ children }: { children: React.ReactNode
           { href: "/operator/dr", label: "DR events" },
           { href: "/operator/settlement", label: "Settlement" },
           { href: "/operator/members", label: "Members" },
-          { href: "/operator/impact", label: "Impact & economics" },
         ]}
       />
       <div className="flex-1">{children}</div>

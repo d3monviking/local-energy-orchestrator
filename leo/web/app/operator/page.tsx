@@ -317,28 +317,28 @@ export default function OperatorHome() {
                 const v = liveVoltage[p];
                 const d = liveDispatch[p];
                 const bad = v?.voltage_v != null && (v.voltage_v < floor || v.voltage_v > ceil);
-                const act = !d ? "no data yet" : d.mode === "backup" ? "feeding the backup circuit" : d.actual_kw > 0.05 ? `discharging ${d.actual_kw.toFixed(1)} kW`
-                  : d.actual_kw < -0.05 ? `charging ${(-d.actual_kw).toFixed(1)} kW` : "idle";
+                const act = !d ? "Battery: no data yet" : d.mode === "backup" ? "Battery feeding backup" : d.actual_kw > 0.05 ? `Discharging ${d.actual_kw.toFixed(1)} kW`
+                  : d.actual_kw < -0.05 ? `Charging ${(-d.actual_kw).toFixed(1)} kW` : "Battery idle";
                 return (
                   <div key={p} className="rounded-md border border-[var(--leo-border)] bg-[var(--leo-panel)] px-2.5 py-1.5">
-                    <div className="flex items-baseline justify-between gap-2">
+                    <div className="flex flex-wrap items-baseline justify-between gap-x-2">
                       <PhaseChip phase={p} />
                       <span className={`whitespace-nowrap ${bad ? "font-semibold text-[var(--leo-bad)]" : ""}`}>
                         {v ? (v.supply_present && v.voltage_v != null ? `${v.voltage_v.toFixed(0)} V${bad ? (v.voltage_v < floor ? " low" : " high") : ""}` : "off") : "—"}
                       </span>
                     </div>
                     <div className="text-[var(--leo-text-dim)]">
-                      Battery {act}{d && d.mode !== "backup" ? `, ${(d.soc_after * 100).toFixed(0)}%` : ""}
-                      {d?.rule_triggered && <span className="text-[var(--leo-text)]"> · {RULE_TEXT[d.rule_triggered] ?? d.rule_triggered.replace(/_/g, " ")}</span>}
+                      {act}{d && d.mode !== "backup" ? ` · ${(d.soc_after * 100).toFixed(0)}%` : ""}
+                      {d?.rule_triggered && <span className="block text-[var(--leo-text)]">{(RULE_TEXT[d.rule_triggered] ?? d.rule_triggered.replace(/_/g, " ")).replace(/^./, (c) => c.toUpperCase())}</span>}
                     </div>
                   </div>
                 );
               })}
               <div className="rounded-md border border-[var(--leo-border)] bg-[var(--leo-panel)] px-2.5 py-1.5">
-                <div className="flex items-baseline justify-between gap-2">
+                <div className="flex flex-wrap items-baseline justify-between gap-x-2">
                   <span className="font-semibold">Transformer</span>
                   <span className={liveTrafo != null && liveTrafo > 100 ? "font-semibold text-[var(--leo-bad)]" : ""}>
-                    {currentMode === "backup" ? "off" : liveTrafo != null ? `${liveTrafo.toFixed(0)}%${liveTrafo > 100 ? " over" : ""}` : "—"}
+                    {currentMode === "backup" ? "off" : liveTrafo != null ? `${liveTrafo.toFixed(0)}%` : "—"}
                   </span>
                 </div>
                 <div className="text-[var(--leo-text-dim)]">

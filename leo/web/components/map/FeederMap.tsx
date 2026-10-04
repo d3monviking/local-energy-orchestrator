@@ -14,11 +14,11 @@
  * token required.
  */
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import DeckGL from "@deck.gl/react";
 import { TileLayer } from "@deck.gl/geo-layers";
-import { BitmapLayer, GeoJsonLayer, ScatterplotLayer } from "@deck.gl/layers";
-import type { PickingInfo } from "@deck.gl/core";
+import { BitmapLayer, GeoJsonLayer, ScatterplotLayer, TextLayer } from "@deck.gl/layers";
+import { WebMercatorViewport, type PickingInfo } from "@deck.gl/core";
 
 const CLOUD_API_URL =
   process.env.NEXT_PUBLIC_CLOUD_API_URL ?? "http://localhost:8030";
@@ -58,17 +58,6 @@ const PHASE_COLOR: Record<string, [number, number, number]> = {
   B: [142, 169, 207],
 };
 
-const POINT_STYLE: Record<
-  FeederProperties["feature_type"],
-  { radius: number; color: [number, number, number] }
-> = {
-  line: { radius: 0, color: [255, 255, 255] },
-  bus: { radius: 2, color: [147, 161, 176] },
-  transformer: { radius: 9, color: [230, 237, 243] },
-  household: { radius: 3.5, color: [47, 191, 113] },
-  sensor: { radius: 5, color: [147, 161, 176] },
-  battery_block: { radius: 8, color: [63, 198, 198] },
-};
 
 export type FeederMapProps = {
   dtId: string;
@@ -98,43 +87,17 @@ function voltageColor(v: number, nominal: number, limitPct: number): [number, nu
   return [47, 191, 113]; // green: healthy
 }
 
-/** The transformer, all 3 battery blocks, and all 3 busbar sensors
- * share one lon/lat (the DT site — electrically accurate, confirmed in
- * api.py's own comment, but 7 markers stacked on one pixel means only
- * the topmost ever renders). Display-only fix: keep the transformer
- * anchored at the true point (lines terminate there) and arrange
- * everything else that shares its coordinate in a small ring around
- * it, so each is its own visible, hoverable marker. */
-function fanOutTransformerSite(
-  features: GeoJSON.Feature<GeoJSON.Geometry, FeederProperties>[]
-): GeoJSON.Feature<GeoJSON.Geometry, FeederProperties>[] {
-  const byCoord = new Map<string, GeoJSON.Feature<GeoJSON.Geometry, FeederProperties>[]>();
-  for (const f of features) {
-    const [lon, lat] = (f.geometry as GeoJSON.Point).coordinates;
-    const key = `${lon.toFixed(7)},${lat.toFixed(7)}`;
-    (byCoord.get(key) ?? byCoord.set(key, []).get(key)!).push(f);
-  }
-  const RING_DEG = 0.00005; // ~5.5m at this latitude — distinct markers, still visually "at the DT"
-  const out: GeoJSON.Feature<GeoJSON.Geometry, FeederProperties>[] = [];
-  for (const group of byCoord.values()) {
-    if (group.length === 1) {
-      out.push(group[0]);
-      continue;
-    }
-    const transformer = group.find((f) => f.properties.feature_type === "transformer");
-    const orbiting = group.filter((f) => f !== transformer);
-    if (transformer) out.push(transformer);
-    const [lon, lat] = (group[0].geometry as GeoJSON.Point).coordinates;
-    orbiting.forEach((f, i) => {
-      const angle = (2 * Math.PI * i) / orbiting.length - Math.PI / 2;
-      out.push({
-        ...f,
-        geometry: { type: "Point", coordinates: [lon + RING_DEG * Math.cos(angle), lat + RING_DEG * Math.sin(angle)] },
-      });
-    });
-  }
-  return out;
-}
+type Feature = GeoJSON.Feature<GeoJSON.Geometry, FeederProperties>;
+
+/** Where each infrastructure label sits, in screen pixels from its true point.
+ *  The transformer, batteries and busbar sensors all share the DT's coordinate,
+ *  so they are drawn as a labelled cluster around it instead of stacked dots. */
+const SITE_OFFSET: Record<string, [number, number]> = {
+  transformer: [0, 0],
+  "BATT-R": [92, -24], "BATT-Y": [92, 0], "BATT-B": [92, 24],
+  busbar: [-92, 0],
+};
+const FAREND_OFFSET: Record<string, [number, number]> = { R: [0, -20], Y: [-64, 6], B: [64, 6] };
 
 export default function FeederMap({
   dtId,
@@ -225,10 +188,32 @@ export default function FeederMap({
     };
   }, [runId, snappedTs, nominalV, forecast]);
 
+  // Fit the whole feeder (and its far-end sensors) into whatever size the map has.
+  const boxRef = useRef<HTMLDivElement>(null);
+  const [size, setSize] = useState<{ w: number; h: number } | null>(null);
+  useEffect(() => {
+    const el = boxRef.current;
+    if (!el) return;
+    const ro = new ResizeObserver(([e]) => setSize((prev) => prev ?? { w: e.contentRect.width, h: e.contentRect.height }));
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, []);
   const initialViewState = useMemo(() => {
     const [lon, lat] = data?.properties.centroid ?? [77.7942, 13.07];
-    return { longitude: lon, latitude: lat, zoom: 16.5, pitch: 0, bearing: 0 };
-  }, [data]);
+    const fallback = { longitude: lon, latitude: lat, zoom: 16.5, pitch: 0, bearing: 0 };
+    if (!data || !size || size.w < 50 || size.h < 50) return fallback;
+    const coords: number[][] = [];
+    for (const f of data.features) {
+      if (f.geometry.type === "LineString") coords.push(...(f.geometry as GeoJSON.LineString).coordinates);
+      else if (f.geometry.type === "Point") coords.push((f.geometry as GeoJSON.Point).coordinates);
+    }
+    const lons = coords.map((c) => c[0]), lats = coords.map((c) => c[1]);
+    const vp = new WebMercatorViewport({ width: size.w, height: size.h }).fitBounds(
+      [[Math.min(...lons), Math.min(...lats)], [Math.max(...lons), Math.max(...lats)]],
+      { padding: { top: 44, bottom: 36, left: 24, right: 24 } },
+    );
+    return { longitude: vp.longitude, latitude: vp.latitude, zoom: Math.min(vp.zoom, 18), pitch: 0, bearing: 0 };
+  }, [data, size]);
 
   const layers = useMemo(() => {
     const tileLayer = new TileLayer({
@@ -241,10 +226,13 @@ export default function FeederMap({
         const { west, south, east, north } = props.tile.bbox as {
           west: number; south: number; east: number; north: number;
         };
+        // Dimmed and desaturated so the network and markers read clearly on top.
         return new BitmapLayer(props, {
           data: undefined,
           image: props.data,
           bounds: [west, south, east, north],
+          desaturate: 0.45,
+          tintColor: [150, 150, 150],
         });
       },
     });
@@ -252,72 +240,134 @@ export default function FeederMap({
     if (!data) return [tileLayer];
 
     const lineFeatures = data.features.filter((f) => f.geometry.type === "LineString");
-    const pointFeatures = fanOutTransformerSite(data.features.filter((f) => f.geometry.type === "Point"));
+    const pointFeatures = data.features.filter((f) => f.geometry.type === "Point");
+    const homes = pointFeatures.filter((f) => f.properties.feature_type === "household" || f.properties.feature_type === "bus");
+    const transformer = pointFeatures.find((f) => f.properties.feature_type === "transformer");
+    const batteries = pointFeatures.filter((f) => f.properties.feature_type === "battery_block");
+    const busbar = pointFeatures.filter((f) => f.properties.feature_type === "sensor" && f.properties.placement === "busbar");
+    const farEnd = pointFeatures.filter((f) => f.properties.feature_type === "sensor" && f.properties.placement === "far_end");
+    const pos = (f: Feature) => (f.geometry as GeoJSON.Point).coordinates as [number, number];
+    const font = typeof document !== "undefined" ? getComputedStyle(document.body).fontFamily : "sans-serif";
 
+    const lineColor = (f: Feature): [number, number, number] => {
+      if (!busState) return [150, 162, 175];
+      // Colour by the worse of the two endpoint buses' voltage.
+      const from = f.properties.from_bus ? busState[f.properties.from_bus] : undefined;
+      const to = f.properties.to_bus ? busState[f.properties.to_bus] : undefined;
+      const worse = [from, to]
+        .filter((st): st is BusState => !!st)
+        .sort((a, b) => Math.abs(b.voltage_v - nominalV) - Math.abs(a.voltage_v - nominalV))[0];
+      return worse ? voltageColor(worse.voltage_v, nominalV, vLimitPct) : [150, 162, 175];
+    };
+
+    // A dark casing under every line keeps it legible on bright rooftops.
+    const lineCasing = new GeoJsonLayer({
+      id: "feeder-lines-casing",
+      data: { type: "FeatureCollection", features: lineFeatures } as GeoJSON.FeatureCollection,
+      getLineColor: [5, 8, 12, 200],
+      getLineWidth: 4,
+      lineWidthUnits: "pixels",
+    });
     const feederLines = new GeoJsonLayer({
       id: "feeder-lines",
       data: { type: "FeatureCollection", features: lineFeatures } as GeoJSON.FeatureCollection,
-      getLineColor: (f: GeoJSON.Feature<GeoJSON.Geometry, FeederProperties>) => {
-        if (!busState) return [93, 110, 125];
-        // Colour by the worse of the two endpoint buses' voltage.
-        const from = f.properties.from_bus ? busState[f.properties.from_bus] : undefined;
-        const to = f.properties.to_bus ? busState[f.properties.to_bus] : undefined;
-        const worse = [from, to]
-          .filter((s): s is BusState => !!s)
-          .sort((a, b) => Math.abs(b.voltage_v - nominalV) - Math.abs(a.voltage_v - nominalV))[0];
-        return worse ? voltageColor(worse.voltage_v, nominalV, vLimitPct) : [93, 110, 125];
-      },
-      getLineWidth: (f: GeoJSON.Feature<GeoJSON.Geometry, FeederProperties>) => {
-        const from = f.properties.from_bus ? busState?.[f.properties.from_bus] : undefined;
-        const to = f.properties.to_bus ? busState?.[f.properties.to_bus] : undefined;
-        // Violating lines get a visibly bolder stroke, not just a color
-        // change - a thin red line reads the same as a thin green one
-        // at a glance; a thick one doesn't.
-        return from?.violation || to?.violation ? 3.5 : 1.2;
-      },
-      lineWidthMinPixels: 1,
-      lineWidthUpdateTriggers: { getLineWidth: [busState] },
+      getLineColor: (f: Feature) => lineColor(f),
+      getLineWidth: 2,
+      lineWidthUnits: "pixels",
+      updateTriggers: { getLineColor: [busState] },
       pickable: true,
     });
 
-    const points = new ScatterplotLayer<GeoJSON.Feature<GeoJSON.Geometry, FeederProperties>>({
-      id: "feeder-points",
-      data: pointFeatures,
-      getPosition: (f) => (f.geometry as GeoJSON.Point).coordinates as [number, number],
-      getRadius: (f) => POINT_STYLE[f.properties.feature_type].radius,
+    const points = new ScatterplotLayer<Feature>({
+      id: "homes",
+      data: homes,
+      getPosition: pos,
+      getRadius: (f) => (f.properties.feature_type === "bus" ? 2 : f.properties.is_critical || backupBusIds?.has(f.properties.bus_id ?? f.properties.id) ? 5 : 3.5),
       getFillColor: (f) => {
-        const vType = f.properties.feature_type;
         const busId = f.properties.bus_id ?? f.properties.id;
-        if ((vType === "household" || vType === "bus") && busState?.[busId] != null) {
-          return voltageColor(busState[busId].voltage_v, nominalV, vLimitPct);
-        }
-        if (vType === "household" && f.properties.phase) {
-          return PHASE_COLOR[f.properties.phase] ?? POINT_STYLE.household.color;
-        }
-        return POINT_STYLE[vType].color;
+        if (busState?.[busId] != null) return voltageColor(busState[busId].voltage_v, nominalV, vLimitPct);
+        if (f.properties.feature_type === "household" && f.properties.phase) return PHASE_COLOR[f.properties.phase];
+        return [150, 162, 175];
       },
       getLineColor: (f) => {
-        const onBackup = backupBusIds?.has(f.properties.bus_id ?? f.properties.id);
-        if (onBackup) return [63, 198, 198]; // battery-coloured ring: on the backup circuit
-        return f.properties.is_critical ? [230, 237, 243] : [0, 0, 0, 0];
+        if (backupBusIds?.has(f.properties.bus_id ?? f.properties.id)) return [63, 198, 198];
+        return f.properties.is_critical ? [255, 255, 255] : [5, 8, 12, 200];
       },
-      getLineWidth: (f) => (backupBusIds?.has(f.properties.bus_id ?? f.properties.id) ? 2.5 : 1),
-      lineWidthMinPixels: 1,
+      getLineWidth: (f) => (backupBusIds?.has(f.properties.bus_id ?? f.properties.id) || f.properties.is_critical ? 2 : 1),
+      lineWidthUnits: "pixels",
+      stroked: true,
+      radiusUnits: "pixels",
+      updateTriggers: { getFillColor: [busState], getLineColor: [backupBusIds], getRadius: [backupBusIds], getLineWidth: [backupBusIds] },
+      pickable: true,
+    });
+
+    // True positions of site equipment and far-end sensors.
+    const anchors = new ScatterplotLayer<Feature>({
+      id: "equipment-anchors",
+      data: [...(transformer ? [transformer] : []), ...farEnd],
+      getPosition: pos,
+      getRadius: (f) => (f.properties.feature_type === "transformer" ? 6 : 5),
+      getFillColor: (f) => (f.properties.feature_type === "transformer" ? [255, 255, 255] : [196, 181, 253]),
+      getLineColor: [5, 8, 12],
+      getLineWidth: 2,
+      lineWidthUnits: "pixels",
       stroked: true,
       radiusUnits: "pixels",
       pickable: true,
     });
 
-    return [tileLayer, feederLines, points];
-  }, [data, busState, nominalV, vLimitPct, backupBusIds]);
+    type Label = { f: Feature; text: string; offset: [number, number]; kind: "transformer" | "battery" | "sensor" };
+    const labels: Label[] = [];
+    if (transformer) {
+      labels.push({ f: transformer, text: "Transformer", offset: SITE_OFFSET.transformer, kind: "transformer" });
+      for (const b of batteries) {
+        const d = b.properties.phase ? liveDispatchByPhase?.[b.properties.phase] : undefined;
+        const soc = d ? `  ${(d.soc_after * 100).toFixed(0)}%` : "";
+        labels.push({ f: { ...b, geometry: transformer.geometry }, text: `Battery ${b.properties.phase}${soc}`, offset: SITE_OFFSET[b.properties.id] ?? [92, 0], kind: "battery" });
+      }
+      if (busbar.length) labels.push({ f: { ...busbar[0], geometry: transformer.geometry }, text: "Sensors R Y B", offset: SITE_OFFSET.busbar, kind: "sensor" });
+    }
+    for (const f of farEnd) {
+      labels.push({ f, text: `Far-end sensor ${f.properties.phase}`, offset: FAREND_OFFSET[f.properties.phase ?? "R"] ?? [0, -20], kind: "sensor" });
+    }
+    const PILL: Record<Label["kind"], { bg: [number, number, number, number]; fg: [number, number, number, number] }> = {
+      transformer: { bg: [255, 255, 255, 245], fg: [11, 15, 20, 255] },
+      battery: { bg: [63, 198, 198, 245], fg: [6, 22, 24, 255] },
+      sensor: { bg: [196, 181, 253, 245], fg: [24, 16, 48, 255] },
+    };
+    const siteLabels = new TextLayer<Label>({
+      id: "equipment-labels",
+      data: labels,
+      getPosition: (l) => pos(l.f),
+      getText: (l) => l.text,
+      getPixelOffset: (l) => l.offset,
+      getColor: (l) => PILL[l.kind].fg,
+      getSize: 12,
+      fontFamily: font,
+      fontWeight: 600,
+      characterSet: "auto",
+      background: true,
+      getBackgroundColor: (l) => PILL[l.kind].bg,
+      getBorderColor: [5, 8, 12, 255],
+      getBorderWidth: 1,
+      backgroundBorderRadius: 4,
+      backgroundPadding: [6, 3],
+      getTextAnchor: "middle",
+      getAlignmentBaseline: "center",
+      updateTriggers: { getText: [liveDispatchByPhase] },
+      pickable: true,
+    });
+
+    return [tileLayer, lineCasing, feederLines, points, anchors, siteLabels];
+  }, [data, busState, nominalV, vLimitPct, backupBusIds, liveDispatchByPhase]);
 
   return (
-    <div className="relative w-full h-full rounded-lg overflow-hidden border border-[var(--leo-border)]">
+    <div ref={boxRef} className="relative w-full h-full rounded-lg overflow-hidden border border-[var(--leo-border)]">
       <DeckGL
         initialViewState={initialViewState}
         controller={true}
         layers={layers}
-        onHover={(info) => setHover(info.object ? info : null)}
+        onHover={(info) => setHover(info.object ? { ...info, object: info.object.f ?? info.object } : null)}
         getTooltip={undefined}
       />
 
@@ -334,40 +384,55 @@ export default function FeederMap({
         </div>
       )}
 
-      <details open className="group absolute top-2 right-2 rounded-md bg-black/75 text-xs leading-snug">
-        <summary className="cursor-pointer select-none px-2.5 py-1.5 text-[var(--leo-text-dim)] hover:text-[var(--leo-text)]">
-          Legend
+      <details className="group absolute top-2 right-2 rounded-md border border-white/10 bg-[rgb(11_15_20/0.88)] text-xs leading-snug backdrop-blur-sm open:w-56">
+        <summary className="flex cursor-pointer select-none list-none items-center gap-3 px-3 py-1.5 text-[var(--leo-text)] [&::-webkit-details-marker]:hidden">
+          {[
+            ["rgb(47,191,113)", "ok"],
+            ["rgb(224,167,46)", "near limit"],
+            ["rgb(224,71,62)", "outside limits"],
+          ].map(([c, t]) => (
+            <span key={t} className="flex items-center gap-1.5 whitespace-nowrap group-open:hidden">
+              <span aria-hidden className="inline-block h-[3px] w-3.5 rounded" style={{ background: c }} />
+              {t}
+            </span>
+          ))}
+          <span className="ml-auto whitespace-nowrap text-[var(--leo-text-dim)] group-open:ml-0">
+            <span className="group-open:hidden">Legend ▸</span><span className="hidden group-open:inline">Legend ▾</span>
+          </span>
         </summary>
-        <div className="flex flex-col gap-1 px-2.5 pb-2">
-        <span className="text-[var(--leo-text-dim)]">Voltage at each point</span>
-        <span className="flex items-center gap-2">
-          <span aria-hidden className="inline-block h-[3px] w-4 rounded" style={{ background: "rgb(47,191,113)" }} />
-          healthy
-        </span>
-        <span className="flex items-center gap-2">
-          <span aria-hidden className="inline-block h-[3px] w-4 rounded" style={{ background: "rgb(224,167,46)" }} />
-          near the limit
-        </span>
-        <span className="flex items-center gap-2">
-          <span aria-hidden className="inline-block h-[5px] w-4 rounded" style={{ background: "rgb(224,71,62)" }} />
-          outside ±{vLimitPct}% of {nominalV} V (thick line)
-        </span>
-        <span className="flex items-center gap-2">
-          <span aria-hidden className="inline-block h-2.5 w-2.5 rounded-full border-2" style={{ borderColor: "rgb(63,198,198)" }} />
-          on backup power
-        </span>
-        <span className="flex items-center gap-2">
-          <span aria-hidden className="inline-block h-2.5 w-2.5 rounded-full" style={{ background: "rgb(230,237,243)" }} />
-          transformer
-        </span>
-        <span className="flex items-center gap-2">
-          <span aria-hidden className="inline-block h-2.5 w-2.5 rounded-full" style={{ background: "rgb(63,198,198)" }} />
-          battery (one per phase)
-        </span>
-        <span className="flex items-center gap-2">
-          <span aria-hidden className="inline-block h-2 w-2 rounded-full" style={{ background: "rgb(147,161,176)" }} />
-          sensor
-        </span>
+        <div className="flex flex-col gap-3 px-3 pb-3 pt-1">
+          <div className="flex flex-col gap-1.5">
+            <span className="text-[var(--leo-text-dim)]">Voltage on lines and homes</span>
+            {[
+              ["rgb(47,191,113)", "healthy"],
+              ["rgb(224,167,46)", "near the limit"],
+              ["rgb(224,71,62)", `outside ${nominalV} V ±${vLimitPct}%`],
+            ].map(([c, t]) => (
+              <span key={t} className="flex items-center gap-2">
+                <span aria-hidden className="inline-block h-[3px] w-5 rounded" style={{ background: c }} />
+                {t}
+              </span>
+            ))}
+          </div>
+          <div className="flex flex-col gap-1.5">
+            <span className="text-[var(--leo-text-dim)]">Equipment</span>
+            <span className="flex flex-wrap gap-1.5">
+              <span className="rounded bg-white px-1.5 py-0.5 font-semibold text-[#0b0f14]">Transformer</span>
+              <span className="rounded bg-[#3fc6c6] px-1.5 py-0.5 font-semibold text-[#061618]">Battery</span>
+              <span className="rounded bg-[#c4b5fd] px-1.5 py-0.5 font-semibold text-[#181030]">Sensor</span>
+            </span>
+          </div>
+          <div className="flex flex-col gap-1.5">
+            <span className="text-[var(--leo-text-dim)]">Homes</span>
+            <span className="flex items-center gap-2">
+              <span aria-hidden className="inline-block h-2.5 w-2.5 rounded-full border-2 border-white bg-[rgb(47,191,113)]" />
+              critical premise
+            </span>
+            <span className="flex items-center gap-2">
+              <span aria-hidden className="inline-block h-2.5 w-2.5 rounded-full border-2 border-[#3fc6c6] bg-[rgb(47,191,113)]" />
+              on backup power
+            </span>
+          </div>
         </div>
       </details>
 
