@@ -1,3 +1,4 @@
+name: leo  # keeps container and volume names (leo_pgdata) stable regardless of the checkout folder
 services:
   postgres:
     image: postgres:16

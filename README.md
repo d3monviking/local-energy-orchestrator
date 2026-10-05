@@ -5,7 +5,7 @@
 Submission for the **Yuva Yodha Energy Tech Hackathon** · Challenge: **Grid Reliability — Renewable Intermittency**
 Team: **Siddharth Kini · Priyanshu Tiwari**
 
-📄 Full write-up: [`leo/docs/writeup/LEO_Detailed_Documentation.pdf`](leo/docs/writeup/LEO_Detailed_Documentation.pdf) (46 pages, 76 references)
+📄 Full write-up: [`docs/writeup/LEO_Detailed_Documentation.pdf`](docs/writeup/LEO_Detailed_Documentation.pdf) (46 pages, 76 references)
 📁 High-resolution figures, demo video and documentation: [Google Drive folder](https://drive.google.com/drive/folders/17-y-rsIEqzmaN_z9JdgjO-jhdBZ274j8?usp=drive_link)
 
 ---
@@ -136,12 +136,12 @@ The operator commands only assets it owns, and everything that must keep working
 | **Operator cloud** | Forecast training, day-ahead planning, DR engine, settlement, recommendations, consoles | REST, SMS gateway, meter-data exchange (MDMS / India Energy Stack) |
 
 <p align="center">
-  <img src="leo/docs/diagrams/01_system_context.png" width="720" alt="System context"/>
+  <img src="docs/diagrams/01_system_context.png" width="720" alt="System context"/>
   <br/><em>System context: LEO commands only what is inside the operator's boundary; the DISCOM switches its own network.</em>
 </p>
 
 <p align="center">
-  <img src="leo/docs/diagrams/02_layered_architecture.png" width="820" alt="Layered architecture"/>
+  <img src="docs/diagrams/02_layered_architecture.png" width="820" alt="Layered architecture"/>
   <br/><em>Layered architecture with the protocol on each link.</em>
 </p>
 
@@ -244,7 +244,7 @@ Other headline results for the recommended design:
 | Peak day (27 Apr) transformer peak | 186 kW → 116 kW |
 
 <p align="center">
-  <img src="leo/docs/diagrams/04_energy_day.png" width="820" alt="Energy on the peak day"/>
+  <img src="docs/diagrams/04_energy_day.png" width="820" alt="Energy on the peak day"/>
   <br/><em>The intermittency bridge on the peak day: midday charging from rooftop solar, 20 pumps moved to 10:45, evening discharge across the peak, and the automated AC event with SMS offers.</em>
 </p>
 
@@ -256,7 +256,7 @@ Other headline results for the recommended design:
 
 ## Unit economics
 
-Every price comes from a tariff order, market data, a regulator, a DISCOM report or an Indian pilot, or is flagged for verification, in one assumptions file ([`leo/economics.yaml`](leo/economics.yaml)). Physical quantities come from the simulation, so a price can change without re-running it.
+Every price comes from a tariff order, market data, a regulator, a DISCOM report or an Indian pilot, or is flagged for verification, in one assumptions file ([`economics.yaml`](economics.yaml)). Physical quantities come from the simulation, so a price can change without re-running it.
 
 ### Capital and operating cost (per DT)
 
@@ -300,7 +300,7 @@ Two-part contract: ₹2,000/kW-yr for 60.9 verified kW + ₹5.00 per verified ev
 | **Net after paying the operator** | **38,890** |
 
 <p align="center">
-  <img src="leo/docs/diagrams/05_money_flow.png" width="760" alt="Money flow"/>
+  <img src="docs/diagrams/05_money_flow.png" width="760" alt="Money flow"/>
   <br/><em>Money flow per transformer per year (₹ lakh).</em>
 </p>
 
@@ -309,7 +309,7 @@ Two-part contract: ₹2,000/kW-yr for 60.9 verified kW + ₹5.00 per verified ev
 The operator breaks even at **₹4.56** per verified evening kWh and the DISCOM gains up to **₹5.77**; the ₹5.00 contract rate sits inside this **deal zone**, with a combined 10-year value of ₹3.49 L. Smaller batteries and SMS-only DR do not close.
 
 <p align="center">
-  <img src="leo/docs/diagrams/09_deal_zone.png" width="700" alt="Deal zone"/>
+  <img src="docs/diagrams/09_deal_zone.png" width="700" alt="Deal zone"/>
   <br/><em>Operator break-even rate vs the most the DISCOM can pay, by configuration.</em>
 </p>
 
@@ -380,7 +380,6 @@ Upfront cost ₹0, electricity bills unchanged, no penalties anywhere. For compa
 ### 1. Start the stack
 
 ```bash
-cd leo
 docker compose up -d --build
 ```
 
@@ -423,7 +422,7 @@ python -m eval.economics --sweep-id year      # prices the sweep with economics.
 ## Repository layout
 
 ```
-leo/
+.
 ├── world/          Simulated neighbourhood: OSM feeder, households, PV, weather, outages, IRT library
 ├── sim/            Closed-loop simulator that records the demo scenarios into Postgres
 ├── gateway/        Edge gateway: day-ahead forecast and plan, live correction, outage handling
@@ -476,4 +475,4 @@ leo/
 
 ---
 
-<sub>All results are from a simulated world calibrated to public data and Indian pilots. Sources for every figure and price are listed in the [full write-up](leo/docs/writeup/LEO_Detailed_Documentation.pdf).</sub>
+<sub>All results are from a simulated world calibrated to public data and Indian pilots. Sources for every figure and price are listed in the [full write-up](docs/writeup/LEO_Detailed_Documentation.pdf).</sub>

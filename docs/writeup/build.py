@@ -2,7 +2,7 @@
 
 Every number is read from eval/results/econ_year.json (the year-sampled
 simulation priced by economics.yaml), so the document cannot drift from
-the results. Run from leo/:
+the results. Run from the repo root:
 
     python docs/writeup/build.py && node docs/writeup/print.mjs
 """

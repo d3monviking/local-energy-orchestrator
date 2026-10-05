@@ -1,4 +1,4 @@
-# Build context is the repo root (leo/); see docker-compose.yml.
+# Build context is the repo root; see docker-compose.yml.
 # gateway/ imports absolute (`from gateway.network_model import ...`), so
 # the repo root stays on PYTHONPATH rather than cd'ing into gateway/.
 FROM python:3.12-slim

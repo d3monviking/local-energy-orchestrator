@@ -1,4 +1,4 @@
-# Build context is the repo root (leo/); see docker-compose.yml.
+# Build context is the repo root; see docker-compose.yml.
 # cloud/training.py imports gateway.forecast.*, so the gateway package
 # (and its dependencies, hence the shared root requirements.txt) is
 # needed here too.
