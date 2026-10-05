@@ -15,6 +15,13 @@ from datetime import datetime, timedelta
 
 FIFTEEN_MIN = timedelta(minutes=15)
 
+ACTION_TEXT = {
+    "tap_change_raise": "raise the transformer tap",
+    "tap_change_lower": "lower the transformer tap",
+    "review_inverter_settings": "review rooftop inverter voltage settings",
+    "flisr_scope": "locate and isolate the upstream fault (scope attached)",
+}
+
 RUNS = {
     "normal": {"label": "Peak day — with LEO", "forecast_from": "normal", "leo": True},
     "baseline": {"label": "Peak day — without LEO", "forecast_from": "normal", "leo": False},
@@ -464,17 +471,32 @@ async def action_log(conn, run_id: str) -> list[dict]:
         add(m["ts"], f"Mode ({m['o']})", "mode", f"Mode: {m['f']} → {m['t']}", m["reason"] or "",
             severity="warn" if m["t"] != "normal" else "info", meta={"from": m["f"], "to": m["t"]})
 
-    # Escalations: placed at the end of the episode LEO couldn't close.
-    recs = await conn.fetch("SELECT rec_id, phase::text AS phase, issue::text AS issue, recommended_action::text AS action, severity::text AS sev, evidence, window_end FROM recommendation WHERE run_id = $1", run_id)
+    # Escalations: placed when LEO knows it can't close the gap, i.e. once a
+    # phase has stayed out of limits for an hour with battery and DR running
+    # (the recommendation engine's own trigger); outages at the moment of detection.
+    recs = await conn.fetch("SELECT rec_id, phase::text AS phase, issue::text AS issue, recommended_action::text AS action, severity::text AS sev, evidence, window_start, window_end FROM recommendation WHERE run_id = $1", run_id)
     aev = _voltage_events(aser, nb)
+    planned_cut = any(i["kind"] == "load_shedding_notice" for i in items)
     for r in recs:
-        ev = next((a for a in aev if a["phase"] == r["phase"]), None)
-        ts = ev["end"] if ev else r["window_end"]
+        if r["phase"] is None:
+            if planned_cut:  # the DISCOM scheduled this cut itself; there is no fault to locate
+                continue
+            ts = r["window_start"]
+            detail = f"{r['issue'].replace('_', ' ')} ({r['sev']} severity) — {r['rec_id']}"
+            why = "The fault is upstream of LEO's transformer; locating and isolating it is the DISCOM's job"
+        else:
+            want = "undervoltage" if "under" in r["issue"] else "overvoltage"
+            ev = next((a for a in aev if a["phase"] == r["phase"] and a["type"] == want), None) \
+                or next((a for a in aev if a["phase"] == r["phase"]), None)
+            start = ev["start"] if ev else r["window_start"]
+            end = ev["end"] if ev else r["window_end"]
+            ts = min(start + timedelta(hours=1), end)
+            detail = (f"Out of limits for an hour despite battery and DR — {r['issue'].replace('_', ' ')} "
+                      f"({r['sev']} severity), {r['rec_id']}")
+            why = "Voltage drop along long lines can't be fixed by a battery at the transformer; a tap change is the DISCOM's"
         add(ts, "Escalation", "recommendation",
-            f"Escalated to DISCOM: {r['action'].replace('_', ' ')}" + (f" on phase {r['phase']}" if r["phase"] else ""),
-            f"{r['issue'].replace('_', ' ')} ({r['sev']} severity) — {r['rec_id']}",
-            "LEO's battery and DR couldn't close this gap locally; network-side action is the DISCOM's",
-            link="/discom", severity="warn")
+            f"Escalated to DISCOM: {ACTION_TEXT.get(r['action'], r['action'].replace('_', ' '))}" + (f" on phase {r['phase']}" if r["phase"] else ""),
+            detail, why, link="/discom", severity="warn")
 
     items.sort(key=lambda x: x["ts"])
     return items
