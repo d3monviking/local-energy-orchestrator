@@ -225,7 +225,7 @@ export default function OperatorHome() {
     .filter((a) => ["grid_loss", "grid_return", "load_shedding_notice", "dr_window", "recommendation"].includes(a.kind))
     .map((a) => ({
       ts: a.ts, label: a.title,
-      kind: (a.kind === "grid_loss" ? "outage" : a.kind === "grid_return" ? "restoration" : a.kind === "dr_window" ? "dr_event" : a.kind === "recommendation" ? "escalation" : "violation") as TimelineEventKind,
+      kind: (a.kind === "grid_loss" ? "outage" : a.kind === "grid_return" ? "restoration" : a.kind === "dr_window" ? "dr_event" : a.kind === "recommendation" ? "escalation" : a.kind === "load_shedding_notice" ? "notice" : "violation") as TimelineEventKind,
     }));
   const bands = events.filter((e) => e.predicted_at).map((e) => ({ startTs: e.start, endTs: e.end, color: EVENT_STYLE[e.type]?.color ?? "#93a1b0", label: `Predicted: ${e.title}` }));
   const doSeek = (ts: string) => setSeek({ ts, nonce: Date.now() });

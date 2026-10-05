@@ -21,7 +21,7 @@ export type TimelineSegment = {
   endTs: string; // ISO 8601
 };
 
-export type TimelineEventKind = "violation" | "dr_event" | "outage" | "restoration" | "escalation";
+export type TimelineEventKind = "violation" | "dr_event" | "outage" | "restoration" | "escalation" | "notice";
 
 export type TimelineEventMarker = {
   ts: string; // ISO 8601
@@ -59,6 +59,7 @@ const EVENT_COLOR: Record<TimelineEventKind, string> = {
   outage: "var(--leo-bad)",
   restoration: "var(--leo-ok)",
   escalation: "var(--leo-warn)",
+  notice: "var(--leo-warn)",
 };
 
 const EVENT_LABEL: Record<TimelineEventKind, string> = {
@@ -67,6 +68,7 @@ const EVENT_LABEL: Record<TimelineEventKind, string> = {
   outage: "Grid lost",
   restoration: "Grid back",
   escalation: "Sent to DISCOM",
+  notice: "Shedding notice",
 };
 
 const SPEED_LABEL: Record<number, string> = { 60: "1 min per second", 300: "5 min per second", 900: "15 min per second", 3600: "1 hour per second" };
