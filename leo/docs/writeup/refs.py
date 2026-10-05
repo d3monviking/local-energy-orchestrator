@@ -4,9 +4,6 @@ numbers are assigned in order of first citation."""
 REFS = {
     # Brief and team documents
     "brief": "Yuva Yodha Energy Tech Hackathon, “Grid Reliability: Renewable Intermittency — making clean power dependable, neighbourhood by neighbourhood”, problem statement, 2026.",
-    "research": "LEO team, “Grid Reliability and Renewable Intermittency: Architecting Dependable Local Power Networks Through Distributed Flexibility” (research plan compiling the sources cited below), October 2026.",
-    "proposal": "LEO team, “LEO — Local Energy Orchestrator: Working Proposal”, Section 2 “Design Philosophy: What We Adopted, and From Where”, September 2026.",
-    "arch": "LEO team, “LEO — System Architecture v3.0” and “LEO — Build Specification v1.0”, October 2026.",
     # Policy and regulation
     "ceew": "M. Sikdar, A. Woodward, D. Aggarwal, Y. Sun, “How Can India Create a Demand Flexibility Market? A Roadmap for a Flexible Power System”, CEEW and Centre for Net Zero, June 2026. https://www.ceew.in/sites/default/files/ceew-how-can-india-create-a-demand-flexibility-market-web-ready.pdf",
     "merc": "Maharashtra Electricity Regulatory Commission (Demand Flexibility and Demand Side Management, Measurement and Verification) Regulations, 2024. https://www.legitquest.com/act/maharashtra-electricity-regulatory-commission-demand-flexibility-and-demand-side-managementmeasurement-and-verification-regulations-2024/1079F",
@@ -47,12 +44,12 @@ REFS = {
     "sldc": "Karnataka State Load Despatch Centre, real-time system data portal.",
     "cea_interop": "Central Electricity Authority, report on interoperability of smart metering under RDSS.",
     # DR evidence
-    "tata_ddl": "Tata Power-DDL behavioural demand response programme: 2,041 enrolled domestic consumers, 56% average participation per event (75% peak), 21% average reduction vs baseline; ₹250/event for >10% reduction plus ₹200 sign-up, other tiers ₹50/₹100; 16, 12 and 16 events in FY22–FY24, ≤2 h, 3–4 per month April–September (compiled in team research notes).",
-    "bypl": "BSES Yamuna Power Ltd and AEEE, automated demand response pilot: 48 households; 1–5 kW spot reduction for a 30-customer cluster (0.03–0.16 kW per connected customer); ₹1 per kWh saved (compiled in team research notes).",
+    "tata_ddl": "Tata Power-DDL behavioural demand response programme: 2,041 enrolled domestic consumers, 56% average participation per event (75% peak), 21% average reduction vs baseline; ₹250/event for >10% reduction plus ₹200 sign-up, other tiers ₹50/₹100; 16, 12 and 16 events in FY22–FY24, ≤2 h, 3–4 per month April–September.",
+    "bypl": "BSES Yamuna Power Ltd and AEEE, automated demand response pilot: 48 households; 1–5 kW spot reduction for a 30-customer cluster (0.03–0.16 kW per connected customer); ₹1 per kWh saved.",
     "imperial_tata": "Imperial College London and Tata Power, randomised trial of smart-switch demand response with residential customers in Mumbai and New Delhi.",
     "caiso_dr": "CAISO, “Demand Response Advanced Measurement Methodology”, updated February 2022.",
-    "ac_share": "Household air-conditioner ownership in India (~8% nationally, concentrated in higher-income urban homes) (compiled in team research notes).",
-    "smart_devices": "Indian retail pricing for Wi-Fi IR blasters (₹799–999) and smart AC remote + 16 A smart plug bundles (~₹2,090) (compiled in team research notes).",
+    "ac_share": "Household air-conditioner ownership in India (~8% nationally, concentrated in higher-income urban homes).",
+    "smart_devices": "Indian retail pricing for Wi-Fi IR blasters (₹799–999) and smart AC remote + 16 A smart plug bundles (~₹2,090).",
     # Industry and academic precedents (proposal Section 2)
     "huang": "K. Huang, L. Cheng, Y. Zhou, F. Shi, Y. Xi, Y. Zhuang, N. Qi, “Real-Time Peer-to-Peer Energy Trading for Multi-Microgrids: Improved Double Auction Mechanism and Prediction-Free Online Trading Approach”, arXiv:2510.02985, 2025.",
     "schneider": "Schneider Electric, EcoStruxure ADMS and EcoStruxure DERMS — technical feature and applications overview.",

@@ -8,6 +8,7 @@ the results. Run from leo/:
 """
 import json
 import re
+import shutil
 from pathlib import Path
 
 from refs import REFS
@@ -56,11 +57,29 @@ def pct(a, b):
 
 fig_no = [0]
 tab_no = [0]
+DIAGRAMS = HERE.parent / "diagrams"
+FIGURES = HERE / "figures"  # numbered copies for the Drive folder, named as in the PDF
+
+
+def export_figure(name: str, number: int, suffix: str = "") -> str:
+    """Copy a diagram (PNG and SVG) to figures/Figure_NN_<description>.<ext>
+    and return the PNG's path relative to the HTML."""
+    stem = Path(name).stem
+    desc = re.sub(r"^\d+[a-z]?_", "", stem)
+    out = f"Figure_{number:02d}_{desc}{suffix}"
+    for ext in (".png", ".svg"):
+        src = DIAGRAMS / f"{stem}{ext}"
+        if src.exists():
+            shutil.copyfile(src, FIGURES / f"{out}{ext}")
+    return f"figures/{out}.png"
 
 
 def fig(name: str, caption: str, width: str = "100%", land: bool = False) -> str:
     fig_no[0] += 1
-    f = (f"<figure><img src='../diagrams/{name}' style='width:{width}'/>"
+    src = export_figure(name, fig_no[0])
+    if name == "10_data_model.png":  # the complete schema ships alongside, under the same number
+        export_figure("10_data_model_full.png", fig_no[0])
+    f = (f"<figure><img src='{src}' style='width:{width}'/>"
          f"<figcaption><b>Figure {fig_no[0]}.</b> {caption}</figcaption></figure>")
     return f"<div class='land'>{f}</div>" if land else f
 
@@ -137,6 +156,8 @@ code { font-size: 8.6pt; background: #f6f8fa; padding: 0 2pt; }
 
 
 def main():
+    shutil.rmtree(FIGURES, ignore_errors=True)
+    FIGURES.mkdir()
     ctx = dict(cite=cite, lakh=lakh, n=n, pct=pct, fig=fig, table=table, E=ECON, assumptions_rows=assumptions_rows)
     secs = sections(ctx)
     toc = "".join(f"<div>{i}. {t}</div>" for i, (t, _) in enumerate(secs[1:], 1))

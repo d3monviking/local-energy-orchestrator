@@ -35,6 +35,8 @@ def sections(c):
   </div>
   <h2 style='margin-top:26pt'>Contents</h2>
   {{{{TOC}}}}
+  <p class='small' style='margin-top:14pt'>High-resolution versions of every figure in this document (PNG and scalable SVG), named by
+  figure number, are available in the same Google Drive folder as this PDF.</p>
 </div>"""))
 
     # ------------------------------------------------------- 1 Executive summary
@@ -91,14 +93,14 @@ a weather event.</p>
 <p>BESCOM's DT failure rate has stayed between 7.5% and 8.07%; in FY 2023-24 it lost 38,288 of 497,991 units (7.96%), and
 sustained overload causes 29.09% of failures{cite('hindu_dt','dt_failure')}. Overloading raises hot-spot temperature and
 accelerates insulation ageing, cutting an expected 30-year life to 11–15 years; one Indian case study recorded failures within
-20–28 months{cite('dt_overload','dt_premature')}. A 100 kVA unit costs about ₹5.05 lakh to replace; a repair about ₹11,520{cite('dt_repair','research')}.
+20–28 months{cite('dt_overload','dt_premature')}. A 100 kVA unit costs about ₹5.05 lakh to replace; a repair about ₹11,520{cite('dt_repair')}.
 Peri-urban DTs that grew with their neighbourhoods without augmentation are the ones at risk — and a failed DT means a
 multi-day outage for every household on it.</p>
 
 <h2>2.3 Losses peak with the peak</h2>
 <p>BESCOM's AT&amp;C losses fell to 9.13% in FY 2023-24{cite('hindu_loss')}. The technical part is resistive (I²R) and grows with the
 square of current, so a disproportionate share is lost precisely at the evening peak; single-phase heavy appliances make
-Indian LV networks unbalanced, adding neutral current{cite('dt_overload','research')}.</p>
+Indian LV networks unbalanced, adding neutral current{cite('dt_overload')}.</p>
 
 <h2>2.4 The DISCOM is blind below the feeder, and household data arrives a day late</h2>
 <p>DISCOMs see the 11 kV feeder through SCADA and the National Feeder Monitoring System{cite('nfms')} but only about 3% of DT meters
@@ -140,14 +142,14 @@ feeder stress and recommends actions{cite('brief')}.</p>
     out.append(("Proposed solution", f"""
 <p>LEO is the missing coordination layer between the DISCOM's feeder-level systems and the households on one transformer.
 It complements rather than competes with utility ADMS/DERMS: we adopt the DERMS idea of aggregating many small resources
-into one controllable virtual resource, but without claiming utility-grade control authority{cite('schneider','proposal')}.</p>
+into one controllable virtual resource, but without claiming utility-grade control authority{cite('schneider')}.</p>
 
 <h2>4.1 What is installed at one transformer</h2>
 <ul>
 <li><b>Six voltage/outage sensors</b> on LoRaWAN — three at the DT's LV busbar (one per phase, each with a split-core CT) and three
-at the far end of each phase{cite('arch','esmi','nline')}.</li>
+at the far end of each phase{cite('esmi','nline')}.</li>
 <li><b>Three single-phase storage blocks</b>, one per phase: 60 kWh second-life LFP pack with BMS and a 15 kW hybrid inverter with
-a grid port and a backup port. Three blocks rather than one three-phase unit because LV problems are per phase{cite('arch')}.</li>
+a grid port and a backup port. Three blocks rather than one three-phase unit because LV problems are per phase.</li>
 <li><b>A backup circuit</b> — a separate LV cable from the battery backup ports to six registered critical premises (a clinic,
 a borewell pump, a tuition centre and three shops), each with a dual-source meter that enforces a current limit.</li>
 <li><b>Automated demand-response devices</b> in enrolled homes: a 16 A smart plug on the water pump, a Wi-Fi IR blaster on the
@@ -239,7 +241,7 @@ operator console was designed around one question: <i>what did LEO see coming, w
     ], "User-facing applications built in the prototype.")}
 <p><b>Inclusion.</b> The app and SMS/IVR share one backend path for offers and responses. In the pilot, enrolment, consent, offers,
 earnings, load-shedding and restoration alerts, outage reporting and STOP are designed to work over DLT-registered SMS and an IVR in
-Kannada, Hindi and English, so households without smartphones are not excluded{cite('arch','trai')}. The prototype sends offers and
+Kannada, Hindi and English, so households without smartphones are not excluded{cite('trai')}. The prototype sends offers and
 alerts through a mock SMS service; the IVR is designed but not built.</p>
 <p><b>Technology.</b> Next.js 15 (App Router) with React 19 and Tailwind CSS 4; a deck.gl 9 map{cite('deckgl')}; a FastAPI service over
 PostgreSQL for all data; role-based access enforced at the route level; everything packaged with Docker Compose alongside the mock
@@ -268,7 +270,7 @@ field devices. The prototype uses stub logins (operator, DISCOM, household); a p
     out.append(("System architecture", f"""
 <p>The architecture follows one rule: the operator commands only assets it owns, and everything that must keep working during
 an internet outage runs on the neighbourhood edge gateway. Figure 1 shows the system context; Figure 2 the components by tier
-with the protocol on each link. Component numbers follow our System Architecture v3.0{cite('arch')}, updated to the built system.</p>
+with the protocol on each link.</p>
 {fig('01_system_context.png', caption='System context. The dashed boundary is the operator&apos;s: LEO commands only the sensors, batteries, backup circuit and its own messages. The DISCOM switches its own network; LEO only recommends. Money flows from the DISCOM to the operator under the DFPO contract and from the operator to households.')}
 {fig('02_layered_architecture.png', 'Layered architecture: field hardware, the neighbourhood edge gateway (offline-capable) and the operator cloud, with protocols on each link.')}
 {table(["#", "Component", "Tier", "Role", "Interface / protocol"], comp, "Components.")}
@@ -380,7 +382,7 @@ is the two-part contract (Section 13) plus backup fees. Payouts are sized backwa
 forms the payout budget; contractual DR payments are paid first; the rest funds Stream 1 (households exporting solar while the
 blocks charge, pro-rata) and Stream 2 (a rebate of the blocks' evening discharge, allocated down a participation-ranked queue
 with a per-household cap). If claims exceed the budget they are scaled pro-rata, never promised. No payment is ever negative.
-This follows sonnenCommunity's pooled model rather than a per-kWh auction{cite('sonnen','proposal')} (Section 9).</p>
+This follows sonnenCommunity's pooled model rather than a per-kWh auction{cite('sonnen')} (Section 9).</p>
 
 <h2>7.8 Recommendations (C13) and explainability (C15)</h2>
 <p>When local resources cannot close a gap — typically undervoltage along long lines, which a battery at the busbar cannot fix —
@@ -408,7 +410,7 @@ LEO took and why, and the outcome compared with the forecast.</p>
     ]
     out.append(("Standards, protocols and integration with existing infrastructure", f"""
 <p>LEO uses the standards Indian utilities and vendors already use, so moving from the prototype to a pilot changes addresses and
-drivers, not code. LEO talks to the simulator through MQTT, Modbus and REST exactly as it would to real devices{cite('arch')}.</p>
+drivers, not code. LEO talks to the simulator through MQTT, Modbus and REST exactly as it would to real devices.</p>
 {table(["Standard / protocol", "Layer", "Prototype use", "Real-world integration"], std, "Standards and protocols: current prototype use and the integration path.")}
 <p>References: DLMS/COSEM and Indian meter standards{cite('dlms')}; India Energy Stack{cite('ies','beckn')}; MQTT{cite('mqtt')}; LoRaWAN and
 ChirpStack{cite('lorawan')}; SunSpec Modbus{cite('sunspec')} and OpenEMS{cite('openems')}; anti-islanding{cite('iec62116')}; CIM{cite('cim')};
@@ -416,7 +418,7 @@ OpenADR and IEEE 2030.5{cite('openadr')}; IPMVP{cite('ipmvp')}; TRAI DLT{cite('t
 interoperability{cite('cea_interop')}.</p>
 <h2>8.1 Integration with what the DISCOM already has</h2>
 <ul>
-<li><b>Meter data:</b> via the MDMS export or India Energy Stack, with consumer consent — LEO never needs live household data.</li>
+<li><b>Meter data:</b> collected by the AMISP's head-end system (HES) into the DISCOM's MDMS, and shared with LEO via an MDMS export or India Energy Stack, with consumer consent — LEO never needs live household data.</li>
 <li><b>Network data:</b> GIS / consumer indexing gives the consumer→DT→feeder mapping and sanctioned loads; LEO's generated feeder is
 replaced by the DISCOM's model, exchanged in CIM terms.</li>
 <li><b>Operations:</b> recommendations arrive on a dashboard, an API/webhook or SMS/email to the section office; the DISCOM acts in its
@@ -431,9 +433,9 @@ can reproduce.</li>
         ["Settlement ledger", "Plain relational ledger, Sonnen-style pooled model", "Blockchain / DLT settlement",
          f"Brooklyn Microgrid (LO3 Energy) stalled at pilot scale; its retrospective and an empirical comparison both found a database faster, cheaper and better suited to small, periodic, locally-trusted settlements{cite('brooklyn','comillas')}. UPPCL's P2P pilot was 12 participants with mock trading{cite('powerledger')}."],
         ["Price mechanism", "Pooled capacity with fair-access rules", "Iterative P2P double auction between households",
-         f"Auction convergence assumes price-elastic participants (e.g. microgrids with storage); a household's rooftop export is nearly fixed regardless of price{cite('huang','proposal')}."],
+         f"Auction convergence assumes price-elastic participants (e.g. microgrids with storage); a household's rooftop export is nearly fixed regardless of price{cite('huang')}."],
         ["DR learning", "Contextual bandit (disjoint LinUCB)", "Full reinforcement learning",
-         f"The question — which offer to make this household now — has no long action sequences; fatigue and budget are captured as context features. Bandits converge with far less data and are standard for which-offer problems{cite('li_linucb','proposal')}."],
+         f"The question — which offer to make this household now — has no long action sequences; fatigue and budget are captured as context features. Bandits converge with far less data and are standard for which-offer problems{cite('li_linucb')}."],
         ["DR learner structure", "One model per offer level", "One shared linear model with level as a feature",
          "The shared model paid shops that are open during the event and non-responders, and gave ₹0 to price-sensitive homes; separate per-arm models learn each offer's own response."],
         ["DR mechanism", "Automated pump shifting and AC cycling + SMS offers", "SMS behavioural DR only",
@@ -461,7 +463,7 @@ can reproduce.</li>
     ]
     out.append(("Design decisions and alternatives we rejected", f"""
 <p>We grounded the design in one academic paper, two policy roadmaps and several industry deployments, and for each we recorded
-what we took and what we left out{cite('proposal')}. The single filter every choice passed was: <i>minimal grid-level intervention,
+what we took and what we left out (Section 9.1). The single filter every choice passed was: <i>minimal grid-level intervention,
 genuine affordability, useful to the DISCOM without new capex</i>.</p>
 <h2>9.1 What we adopted, and from where</h2>
 <ul>
@@ -587,7 +589,7 @@ recruited locally — visual inspections, inverter filter cleaning, sensor and d
 <li><b>Daily:</b> the operator reviews and approves tomorrow's plan in the console (about 10 minutes per DT), answers recommendations
 status from the DISCOM, and handles household queries by phone/IVR.</li>
 <li><b>Platform:</b> cloud hosting ≈₹5,000/month per cluster; DLT-registered SMS at ≈₹0.145 per message plus ₹5,900 one-time
-registration{cite('research','dlt','sms_cost')}.</li>
+registration{cite('dlt','sms_cost')}.</li>
 </ul>
 <h2>12.3 Maintenance</h2>
 {table(["Asset", "Routine", "Life / replacement", "On failure"], [
@@ -633,13 +635,13 @@ transformer ageing, backup minutes, DR offers and payouts) by prices in one assu
 in the model's assumptions file. Recommended configuration: three 60 kWh blocks on 15 kW inverters plus automated DR, per transformer, per year, in a
 cluster of {A['operating_model']['dts_per_operator']} DTs.</p>
 <h2>13.1 Capital cost</h2>
-{table(["Item (per DT)", "₹"], capex_rows, f"Capital cost. Battery at ₹{n(A['capex']['battery_rs_per_kwh'])}/kWh (second-life, 40–60% of new{cite('wri_2l','pvmag_2l')}); inverters ₹1.2 L per 7.5–15 kW unit; sensors + concentrator ₹30,000; gateway ₹25,000; backup meters + cabling ₹4,000 per premise{cite('research')}; IR blaster ₹999, smart plug bundle ₹2,090{cite('smart_devices')}.", "num")}
+{table(["Item (per DT)", "₹"], capex_rows, f"Capital cost. Battery at ₹{n(A['capex']['battery_rs_per_kwh'])}/kWh (second-life, 40–60% of new{cite('wri_2l','pvmag_2l')}); inverters ₹1.2 L per 7.5–15 kW unit; sensors + concentrator ₹30,000; gateway ₹25,000; backup meters + cabling ₹4,000 per premise; IR blaster ₹999, smart plug bundle ₹2,090{cite('smart_devices')}.", "num")}
 <h2>13.2 Operating cost</h2>
 {table(["Item (per DT per year)", "₹"], opex_rows, "Operating cost. Technician and cloud shared across the cluster; M&amp;V agency cost sits in the DISCOM's DSM portfolio.", "num")}
 <h2>13.3 Operator profit and loss</h2>
 {table(["Line", "₹ per year"], pnl, f"Operator P&amp;L. Contract: ₹{n(A['dfpo']['payment_rs_per_kw_year'])}/kW-yr for {n(ph['verified_peak_kw'],1)} verified kW plus ₹{A['dfpo']['evening_energy_rs_per_kwh']:.2f} per verified evening kWh ({n(ph['flex_kwh'])} kWh/yr); energy settlement on the operator's ToD connection{cite('consumer_rules','sq_tod')}; backup fees.", "num")}
 <h2>13.4 DISCOM</h2>
-{table(["Line", "₹ per year"], discom_rows, f"DISCOM ledger vs no LEO. Power purchase is priced hour by hour — ₹10/kWh in 18:00–23:00, ₹1.91 at midday, ₹7.6 otherwise{cite('ranjith_iex','energymap')} — so round-trip losses, DR rebound and network losses are netted out. Failures valued at ₹5.05 L per 100 kVA DT{cite('research')}.", "num")}
+{table(["Line", "₹ per year"], discom_rows, f"DISCOM ledger vs no LEO. Power purchase is priced hour by hour — ₹10/kWh in 18:00–23:00, ₹1.91 at midday, ₹7.6 otherwise{cite('ranjith_iex','energymap')} — so round-trip losses, DR rebound and network losses are netted out. Failures valued at ₹5.05 L per 100 kVA DT{cite('dt_repair')}.", "num")}
 <p>The DISCOM's <b>gross</b> saving is {lakh(gross)} per DT per year — {lakh(gross*1000)} per year across 1,000 overloaded DTs. It reduces
 technical losses on this DT by {n(loss_saved)} kWh/yr ({n(100*loss_saved/rel['loss_kwh_base'],1)}%) and stops buying {n(ph['flex_kwh']/1000,1)} MWh of
 evening power a year. Most of the gross saving flows to the operator under the contract because the operator carries the capital,
@@ -664,7 +666,7 @@ recommended design the operator breaks even at ₹{op['break_even_rate_rs_per_kw
 <p>For comparison, Tata Power-DDL's pilot paid ₹250 per event (with ₹50/₹100 tiers) and ran 12–16 events a year{cite('tata_ddl')} — about
 ₹2,250 a year for a household attending nine events; LEO's participating homes earn in the same range. Households are paid from the
 operator's realised revenue at a share α = {alpha:.0%}; a deal remains possible up to α ≈ {(op.get('max_alpha_for_deal') or 0):.0%}. A
-low-income household that could not afford a ₹15,000 inverter gets reliability on its street and income, with nothing to buy{cite('research')}.</p>
+low-income household that could not afford a ₹15,000 inverter gets reliability on its street and income, with nothing to buy.</p>
 """))
 
     # ------------------------------------------------- 14 Expected impact
@@ -763,7 +765,7 @@ evaluations and the live system never mix. The ER overview (Figure 12) is genera
         ["Recommendations", "recommendation", "issue, action, phase, evidence, status (open → resolved)", "recommendation engine", "DISCOM dashboard"],
         ["Evaluation", "eval_sweep, eval_day, eval_economics", "configuration, day, metrics, priced results", "evaluation pipeline", "impact page, this document"],
     ], "Data model by group (PostgreSQL; contracts/ddl.sql).")}
-{fig('10_data_model.png', caption='Entity-relationship overview of the core tables, generated from contracts/ddl.sql (the full 29-table diagram, 10_data_model_full.svg, is in the repository).')}
+{fig('10_data_model.png', caption='Entity-relationship overview of the core tables, generated from contracts/ddl.sql (the full 29-table diagram is in the same Google Drive folder as this PDF, as Figure_12_data_model_full).')}
 {table(["Model", "Inputs", "Output", "Validation"], [
         ["Load forecaster (LightGBM quantile)", "Weather forecast, calendar, holidays, lagged load (latency-respecting), phase static features", "P10/P50/P90 gross load per phase, 96 intervals", "Held-out quarterly folds: evening peak MAPE 1.9%, phase WAPE 7.6%, P90 exceedance 5.1%"],
         ["PV model (pvlib + calibration)", "Irradiance, temperature, installed kWp", "PV per home and phase", "Clear-sky midday fit on net-import data"],
@@ -801,7 +803,7 @@ co-funding from loss-reduction programmes) shorten payback further — a 30% gra
 <li>Upgrade planning to the convex reference-trajectory planner with ToD costs and degradation{cite('huang','cvxpy')}; temperature-aware depth of discharge for second-life packs{cite('mdpi_degr')}.</li>
 <li>Midday DR offers to absorb solar surplus (water heating, pumping) where overvoltage is the binding problem; EV charging via OCPP.</li>
 <li>Receive DR events from the DISCOM over OpenADR / IEEE 2030.5; publish verified kW to the DISCOM's DSM cell automatically.</li>
-<li>Multi-operator, cross-neighbourhood settlement — the point at which distributed-ledger guarantees might start to earn their cost{cite('proposal')}.</li>
+<li>Multi-operator, cross-neighbourhood settlement — the point at which distributed-ledger guarantees might start to earn their cost.</li>
 <li>Federated learning for forecasting across DTs without moving household data.</li>
 </ul>
 """))
