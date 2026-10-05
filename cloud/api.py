@@ -727,6 +727,39 @@ async def backup_households_for_run(run_id: str) -> list[dict]:
     return [dict(r) for r in rows]
 
 
+# Same classes and limits as gateway/outage.py (the allocator that ran in the sim).
+BACKUP_PRIORITY = {"health": 1, "water": 2, "livelihood": 3, "education": 3}
+BACKUP_LIMIT_A = {1: 16.0, 2: 10.0, 3: 6.0}
+
+
+@app.get("/api/backup_premises/{run_id}")
+async def backup_premises(run_id: str) -> list[dict]:
+    """Critical premises on the backup circuit, in priority order, with the
+    backup power each actually drew per interval — the console's backup panel."""
+    async with pool.acquire() as conn:
+        nominal = await conn.fetchval("SELECT nominal_v_ln FROM neighbourhood LIMIT 1") or 250.0
+        prem = await conn.fetch("SELECT id, phase::text AS phase, critical_class FROM household WHERE is_critical")
+        rows = await conn.fetch(
+            "SELECT household_id, ts_end, backup_kwh, current_a, limit_active FROM premise_meter WHERE run_id = $1 ORDER BY ts_end",
+            run_id,
+        )
+    by_id: dict[str, list] = {}
+    for r in rows:
+        by_id.setdefault(r["household_id"], []).append({
+            "ts_end": r["ts_end"].isoformat(), "kw": round(r["backup_kwh"] * 4, 2),
+            "current_a": r["current_a"], "limit_active": r["limit_active"],
+        })
+    out = []
+    for p in prem:
+        pr = BACKUP_PRIORITY.get(p["critical_class"])
+        if pr is None:
+            continue
+        out.append({"household_id": p["id"], "phase": p["phase"], "critical_class": p["critical_class"],
+                    "priority": pr, "limit_a": BACKUP_LIMIT_A[pr], "limit_kw": BACKUP_LIMIT_A[pr] * nominal / 1000,
+                    "intervals": by_id.get(p["id"], [])})
+    return sorted(out, key=lambda x: (x["priority"], x["household_id"]))
+
+
 @app.get("/api/community/{run_id}")
 async def community_stats(run_id: str) -> dict:
     """The citizen app's community page (§8.4): battery status, outage

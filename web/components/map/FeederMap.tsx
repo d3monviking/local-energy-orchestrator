@@ -379,7 +379,7 @@ export default function FeederMap({
       {deEnergised && (
         <div role="status" className="absolute bottom-8 left-2 max-w-xs rounded-md bg-black/80 px-3 py-2 text-[13px]">
           <p className="font-semibold">Feeder de-energised</p>
-          <p className="text-[var(--leo-text-dim)]">No grid supply. Homes ringed in teal are on LEO&apos;s backup circuit.</p>
+          <p className="text-[var(--leo-text-dim)]">No grid supply. Critical premises outlined in teal are on LEO&apos;s backup circuit.</p>
         </div>
       )}
 

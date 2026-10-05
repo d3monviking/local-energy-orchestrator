@@ -15,6 +15,7 @@ import Timeline, { TimelineEventKind, TimelineEventMarker } from "@/components/t
 import ForecastPanel from "@/components/operator/ForecastPanel";
 import ActionLog from "@/components/operator/ActionLog";
 import Glossary from "@/components/operator/Glossary";
+import BackupPanel from "@/components/operator/BackupPanel";
 import PhaseChip from "@/components/operator/PhaseChip";
 import { ActionItem, EVENT_STYLE, Forecast, PredictedEvent, RunMeta, fmtTime, ms } from "@/components/operator/types";
 
@@ -320,7 +321,13 @@ export default function OperatorHome() {
                 ))}
               </div>
             </div>
-            <div className="flex-1 min-h-0">
+            <div className="relative flex-1 min-h-0">
+              {(currentMode === "backup" || currentMode === "restoration") && (
+                <div className="pointer-events-none absolute left-2 top-2 z-10">
+                  <BackupPanel runId={run.run_id} currentTs={currentTs} actions={actions}
+                    socByPhase={Object.fromEntries(PHASES.map((p) => [p, liveDispatch[p]?.soc_after]))} />
+                </div>
+              )}
               <FeederMap dtId={DT_ID} runId={run.run_id} ts={currentTs ?? undefined} backupBusIds={backupBusIds}
                 liveDispatchByPhase={liveDispatch} onViolatingCount={setViolatingCount} forecast={mapForecast} />
             </div>
