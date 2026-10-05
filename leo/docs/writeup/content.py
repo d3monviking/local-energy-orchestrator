@@ -387,7 +387,11 @@ This follows sonnenCommunity's pooled model rather than a per-kWh auction{cite('
 <h2>7.8 Recommendations (C13) and explainability (C15)</h2>
 <p>When local resources cannot close a gap — typically undervoltage along long lines, which a battery at the busbar cannot fix —
 LEO sends the DISCOM a structured recommendation (e.g. raise the tap on phase B, 16:15–21:00, with forecast and residual
-evidence), and for outages, the detected scope. The operator console pairs each predicted event with its reasons, the actions
+evidence), and for outages, the detected scope. Each recommendation is stored as structured JSON in LEO's own schema (recommendation
+ID, DT, phase, time window, issue, recommended action, the local actions already tried, and the evidence) and served over the API; the
+DISCOM dashboard shows it as text. LEO never writes to DISCOM equipment. Because the schema is fixed and machine-readable, it can later be
+exported in the standard formats a DISCOM's control-room software uses (Section 8), so a DISCOM that wants to integrate can take
+recommendations straight into its own systems. The operator console pairs each predicted event with its reasons, the actions
 LEO took and why, and the outcome compared with the forecast.</p>
 """))
 
@@ -400,7 +404,7 @@ LEO took and why, and the outcome compared with the forecast.</p>
         ["Modbus TCP, SunSpec models", "Inverter control", "pymodbus mock server, three unit IDs", "Three single-phase hybrid inverters; OpenEMS drivers where available"],
         ["Modbus RTU (RS-485)", "Premise meters", "Mock devices", "Dual-source meters with current limiters"],
         ["IEC 62116; IEEE 1547-2018", "Inverter grid behaviour", "Anti-islanding modelled per block", "Inverter certification; volt-var/volt-watt where supported"],
-        ["IEC 61968/61970 (CIM)", "Network model exchange", "Asset naming in recommendations", "GIS / network-model exchange with the DISCOM"],
+        ["IEC 61968/61970 (CIM)", "Network model and DISCOM messages", "Not yet: recommendations use LEO's own JSON schema", "GIS / network-model exchange; recommendations exported as CIM messages to the DISCOM's ADMS/OMS"],
         ["OpenADR 2.0/3.0; IEEE 2030.5", "DR / DER signalling", "Not used", "DISCOM-to-aggregator event signals (both referenced by IES)"],
         ["IEC 60870-5-104, DNP3, IEC 61850", "DISCOM SCADA / substation", "Not used", "DISCOM-internal; LEO never writes to it"],
         ["IPMVP Option C", "Measurement and verification", "Baselines and holdout in settlement", "Verification by empanelled independent agencies (KERC)"],
@@ -421,8 +425,9 @@ interoperability{cite('cea_interop')}.</p>
 <li><b>Meter data:</b> collected by the AMISP's head-end system (HES) into the DISCOM's MDMS, and shared with LEO via an MDMS export or India Energy Stack, with consumer consent — LEO never needs live household data.</li>
 <li><b>Network data:</b> GIS / consumer indexing gives the consumer→DT→feeder mapping and sanctioned loads; LEO's generated feeder is
 replaced by the DISCOM's model, exchanged in CIM terms.</li>
-<li><b>Operations:</b> recommendations arrive on a dashboard, an API/webhook or SMS/email to the section office; the DISCOM acts in its
-own SCADA/OMS. DR events can later arrive from the DISCOM over OpenADR or IEEE 2030.5.</li>
+<li><b>Operations:</b> today recommendations appear as text on the DISCOM dashboard and as structured JSON (LEO's own schema) over
+the API; they can also go by SMS/email to the section office. The DISCOM decides and acts in its own SCADA/OMS. The JSON can later be
+exported in standard formats (CIM messages for the DISCOM's ADMS/OMS) so that integration needs no change to how recommendations are made. DR events can later arrive from the DISCOM over OpenADR or IEEE 2030.5.</li>
 <li><b>DFPO reporting:</b> verified kW per DT per event, with baselines and holdout, in a form an independent verification agency
 can reproduce.</li>
 </ul>
@@ -803,6 +808,7 @@ co-funding from loss-reduction programmes) shorten payback further — a 30% gra
 <li>Upgrade planning to the convex reference-trajectory planner with ToD costs and degradation{cite('huang','cvxpy')}; temperature-aware depth of discharge for second-life packs{cite('mdpi_degr')}.</li>
 <li>Midday DR offers to absorb solar surplus (water heating, pumping) where overvoltage is the binding problem; EV charging via OCPP.</li>
 <li>Receive DR events from the DISCOM over OpenADR / IEEE 2030.5; publish verified kW to the DISCOM's DSM cell automatically.</li>
+<li>Export recommendations in standard formats (IEC 61968/61970 CIM messages) for direct intake by the DISCOM's ADMS/OMS.</li>
 <li>Multi-operator, cross-neighbourhood settlement — the point at which distributed-ledger guarantees might start to earn their cost.</li>
 <li>Federated learning for forecasting across DTs without moving household data.</li>
 </ul>
