@@ -17,7 +17,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import DeckGL from "@deck.gl/react";
 import { TileLayer } from "@deck.gl/geo-layers";
-import { BitmapLayer, GeoJsonLayer, IconLayer, ScatterplotLayer } from "@deck.gl/layers";
+import { BitmapLayer, GeoJsonLayer, IconLayer, ScatterplotLayer, TextLayer } from "@deck.gl/layers";
 import { batteryIcon, criticalIcon, sensorIcon, transformerIcon } from "./icons";
 import { WebMercatorViewport, type PickingInfo } from "@deck.gl/core";
 
@@ -122,6 +122,7 @@ export default function FeederMap({
   const [hover, setHover] = useState<PickingInfo | null>(null);
   const [busState, setBusState] = useState<Record<string, BusState> | null>(null);
   const [deEnergised, setDeEnergised] = useState(false);
+  const [trafoPct, setTrafoPct] = useState<number | null>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -180,6 +181,9 @@ export default function FeederMap({
           }
         }
         setBusState(byBus);
+        // Transformer loading at this interval: the worst phase, as % of rating.
+        const loads = d.results.map((r) => r.loading_pct).filter((v): v is number => v != null && !Number.isNaN(v));
+        setTrafoPct(loads.length ? Math.max(...loads) : null);
         onViolatingCount?.(Object.values(byBus).filter((b) => b.violation).length);
       })
       .catch(() => !cancelled && setBusState(null));
@@ -331,8 +335,30 @@ export default function FeederMap({
       pickable: true,
     });
 
-    return [tileLayer, lineCasing, feederLines, points, equipment];
-  }, [data, busState, nominalV, vLimitPct, backupBusIds, liveDispatchByPhase]);
+    // Load badge under the transformer: the number that separates "with LEO" from "without".
+    const pct = deEnergised ? null : trafoPct;
+    const badge = transformer && pct != null ? new TextLayer<Feature>({
+      id: "transformer-load",
+      data: [transformer],
+      getPosition: pos,
+      getText: () => `${Math.round(pct)}% load`,
+      getPixelOffset: [-34, 34],
+      getSize: 13,
+      fontWeight: 700,
+      fontFamily: typeof document !== "undefined" ? getComputedStyle(document.body).fontFamily : "sans-serif",
+      characterSet: "auto",
+      getColor: pct > 100 ? [255, 255, 255, 255] : [6, 20, 12, 255],
+      background: true,
+      getBackgroundColor: pct > 100 ? [196, 53, 45, 245] : pct > 85 ? [224, 167, 46, 245] : [47, 191, 113, 245],
+      getBorderColor: [5, 8, 12, 255],
+      getBorderWidth: 1,
+      backgroundBorderRadius: 4,
+      backgroundPadding: [6, 3],
+      updateTriggers: { getText: [pct], getColor: [pct], getBackgroundColor: [pct] },
+    }) : null;
+
+    return [tileLayer, lineCasing, feederLines, points, equipment, ...(badge ? [badge] : [])];
+  }, [data, busState, nominalV, vLimitPct, backupBusIds, liveDispatchByPhase, trafoPct, deEnergised]);
 
   return (
     <div ref={boxRef} className="relative w-full h-full rounded-lg overflow-hidden border border-[var(--leo-border)]">
@@ -390,7 +416,7 @@ export default function FeederMap({
           <div className="flex flex-col gap-1.5">
             <span className="text-[var(--leo-text-dim)]">Equipment</span>
             {[
-              [transformerIcon(), "Transformer"],
+              [transformerIcon(), "Transformer, with its load (% of rating)"],
               [batteryIcon("", 0.6), "Battery, one per phase (fill = charge)"],
               [sensorIcon(), "Sensor (at the transformer and line ends)"],
               [criticalIcon(), "Critical premise"],
