@@ -6,3 +6,8 @@ leo/**/__pycache__/
 leo/world/data/generated/
 leo/cloud/artifacts/
 leo/eval/results/
+
+# design-tool notes and Drive-only exports
+PRODUCT.md
+.impeccable/
+leo/docs/writeup/figures/

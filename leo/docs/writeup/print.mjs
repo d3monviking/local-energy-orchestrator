@@ -1,4 +1,4 @@
-// Print LEO_submission.html to LEO_submission.pdf with headless Chrome (A4, page numbers).
+// Print LEO_submission.html to LEO_Detailed_Documentation.pdf with headless Chrome (A4, page numbers).
 import { spawn } from "node:child_process";
 import { writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
@@ -22,6 +22,6 @@ const footer = `<div style="font-family:Arial;font-size:7.5pt;color:#6e7781;widt
 const pdf = await send("Page.printToPDF", { printBackground: true, preferCSSPageSize: true, displayHeaderFooter: true,
   headerTemplate: "<div></div>", footerTemplate: footer, marginBottom: 0.7, marginTop: 0.6 });
 if (!pdf.data) { console.log("print failed", JSON.stringify(pdf).slice(0, 300)); process.exit(1); }
-writeFileSync(join(here, "LEO_submission.pdf"), Buffer.from(pdf.data, "base64"));
-console.log("written LEO_submission.pdf");
+writeFileSync(join(here, "LEO_Detailed_Documentation.pdf"), Buffer.from(pdf.data, "base64"));
+console.log("written LEO_Detailed_Documentation.pdf");
 ws.close(); chrome.kill(); process.exit(0);
