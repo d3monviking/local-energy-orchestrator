@@ -12,4 +12,4 @@ COPY contracts/ contracts/
 COPY gateway/ gateway/
 
 ENV PYTHONPATH=/app
-CMD ["uvicorn", "gateway.ingest:app", "--host", "0.0.0.0", "--port", "8020"]
+CMD ["uvicorn", "gateway.service:app", "--host", "0.0.0.0", "--port", "8020"]

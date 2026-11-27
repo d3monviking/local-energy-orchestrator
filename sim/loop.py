@@ -1,28 +1,23 @@
-"""sim/loop.py — per-step closed loop, the real recorded-run producer.
-Owner B. Build Specification v1.0 §4.1, §7.2, §7.4.
+"""sim/loop.py — the simulated world, run in lockstep with the edge gateway.
 
-Distinct from eval/run_arms.py (Owner A's fast, numpy-only, fixed-
-schedule two-arm sweep for the M1-M5 metrics over many days): this file
-drives the ACTUAL architecture for one day — gateway/forecast/run.py's
-real day-ahead plan, cloud/dr_engine's real LinUCB-selected DR offers
-sent through mocks/sms_service, sim/personas.py's response model, and
-real Modbus TCP setpoints to mocks/modbus_battery.py — and writes every
-result straight to Postgres under a `run_id`. Per the locked demo
-decision (leo-implementation-plan.md §1): "Pipeline runs beforehand, UI
-reads recorded timelines from Postgres. All models execute for real."
-That is exactly what this file does; it is not a shortcut.
+Records the demo scenarios into Postgres under a `run_id` each. The world
+here owns the truth (household loads, rooftop PV, outages, the three-phase
+power flow, fuse trips); every LEO decision is made by the running edge
+gateway (gateway/service.py), which sees the world only through its own
+devices: sensor uplinks on MQTT, inverters and premise meters on Modbus,
+a DISCOM notice relayed over REST. sim/field.py is that boundary.
 
-Per-step order (§7.2):
-  1. apply DR responses from personas for any active offer
-  2. apply the battery setpoints LEO wrote to units 1-3 (skipped for the
-     baseline arm)
-  3. run pandapower runpp_3ph
-  4. check sustained phase overload; trip the fuse if exceeded
-  5. log truth, produce measurements (sim/measure.py)
+The cloud-side steps of a recorded day run here too, as they would in the
+operator cloud: the day-ahead forecast and plan (gateway/forecast/run.py),
+operator approval, the DR engine's offers (cloud/dr_engine) and the
+households' responses (sim/personas.py), and the day-late meter files.
+
+Needs the stack up (`docker compose up -d`): Postgres, Mosquitto, clock,
+mock-modbus, mock-modbus-meters, mock-sms and gateway.
 
 Usage:
-    python -m sim.loop --run-id normal   --leo-enabled
-    python -m sim.loop --run-id baseline --no-leo-enabled
+    python -m sim.loop                    # all scenarios
+    python -m sim.loop --no-surplus       # skip the sunny-surplus pair
 """
 
 from __future__ import annotations
@@ -32,46 +27,39 @@ import os
 import time
 from dataclasses import dataclass, field
 from datetime import date as date_cls
-from datetime import datetime, timedelta, timezone
 
 import numpy as np
 import pandas as pd
 import pandapower as pp
 import psycopg2
 import psycopg2.extras
-import requests
-from pymodbus.client import AsyncModbusTcpClient
-import asyncio
 
 from world.feeder import build_feeder, load_scenario
 from world.households import assign_ownership_and_truth, generate_true_load
 from world.pv_truth import assign_pv_truth_params, generate_true_pv
 from world.weather import fetch_scenario_weather, to_15min
 from gateway.network_model import (
-    build_pandapower_net, update_household_loads, run_power_flow, detect_violations,
-    compute_phase_limits, linear_phase_limits, get_bus_index,
+    build_pandapower_net, update_household_loads, run_power_flow, detect_violations, get_bus_index,
 )
 from gateway.forecast.load_model import build_features, FEATURE_COLUMNS, train as train_load_model
 from gateway.forecast.pv_model import unit_pv_output_kw, fit_k, compute_clear_midday_mask, pass0_initial_load_estimate
 from gateway.forecast.run import ForecastInputs, run_day_ahead_plan, approve_plan
-from gateway.orchestrator.planner_shave import live_setpoint
 from cloud.dr_engine.linucb import LinUCB, choose_level, build_feature_vector, LEVELS
 from cloud.dr_engine.selection import run_dr_event, ensure_default_consent
 from sim.personas import respond_to_offer
 from sim import measure
+from sim.field import Field, ct_reading
 
 PHASES = ["R", "Y", "B"]
 PHASE_LETTER = {"R": "a", "Y": "b", "B": "c"}
-UNIT_ID_BY_PHASE = {"R": 1, "Y": 2, "B": 3}
+INTERVAL = pd.Timedelta(minutes=15)
 
 IST_OFFSET_HOURS = 5.5
 TRIP_THRESHOLD_PCT = 100.0
 TRIP_CONSECUTIVE_INTERVALS = 4
 TRIP_REPAIR_INTERVALS = 8
 
-DR_WINDOW_IST = (19, 21)  # storyboard beat 2: "Phase R goes amber then red at 19:15"
 V_RUPEES_PER_KWH = 7.92  # IEX evening peak premium (research note); energy value of a kWh cut
-MODBUS_WATCHDOG_S = 120  # comfortably longer than one interval's real-time Modbus round trip
 
 
 def db_connect():
@@ -101,92 +89,47 @@ def _ist_hour(ts: pd.Timestamp) -> float:
     return (ts.hour + ts.minute / 60.0 + IST_OFFSET_HOURS) % 24
 
 
-def to_unsigned16(value: int) -> int:
-    return value & 0xFFFF
-
-
-def to_signed16(value: int) -> int:
-    return value - 0x10000 if value >= 0x8000 else value
-
-
 @dataclass
 class ArmState:
     trip_until: dict = field(default_factory=lambda: {"R": None, "Y": None, "B": None})
     consecutive_overload: dict = field(default_factory=lambda: {"R": 0, "Y": 0, "B": 0})
-    soc: dict = field(default_factory=lambda: {"R": 0.5, "Y": 0.5, "B": 0.5})
 
 
-SOC_MIN, SOC_MAX, BATTERY_EFFICIENCY = 0.15, 0.90, 0.92
-PRE_OUTAGE_SOC_TARGET = 0.90  # §9.3: Pre-outage raises the reserve floor on all three blocks (cap)
-PRE_OUTAGE_CUT_HOURS = 1.5     # the announced cut's length, from the DISCOM's notice
+@dataclass(frozen=True)
+class Outage:
+    """Loss of grid supply at the transformer, as the world experiences it.
+    LEO is not told about it: its sensors go dark and its inverters lose
+    the grid at their terminals."""
+    start: pd.Timestamp
+    end: pd.Timestamp
+    scope: str = "upstream"  # 'upstream' | 'phase:R' | ...
+
+    @property
+    def phases(self) -> list[str]:
+        return list(PHASES) if self.scope == "upstream" else [self.scope.split(":", 1)[1]]
+
+    def down_at(self, ts) -> bool:
+        return self.start <= ts < self.end
+
+    def covers_interval(self, ts_end) -> bool:
+        """An interval touched by the outage has no grid-connected power flow."""
+        return self.start < ts_end <= self.end
 
 
-def bms_step(soc: float, commanded_kw: float, capacity_kwh: float, hours: float = 0.25) -> tuple[float, float]:
-    """Energy accounting for one recorded 15-minute interval: clip the
-    command so SoC never crosses its bounds, then integrate. Done here, at
-    exactly the recorded interval length, because the Modbus mock
-    integrates against the clock service's free-running sim time instead
-    (confirmed: a full 7.5 kW discharge interval moved its SoC ~0.004
-    instead of ~0.125, so the batteries effectively never drained). The
-    Modbus round trip is still made; this is just the source of truth for
-    how much energy actually moved. Returns (actual_kw, new_soc)."""
-    if commanded_kw > 0:
-        max_kw = (soc - SOC_MIN) * capacity_kwh * BATTERY_EFFICIENCY / hours
-        actual = min(commanded_kw, max(0.0, max_kw))
-        return actual, soc - actual * hours / BATTERY_EFFICIENCY / capacity_kwh
-    if commanded_kw < 0:
-        max_kw = (SOC_MAX - soc) * capacity_kwh / BATTERY_EFFICIENCY / hours
-        actual = -min(-commanded_kw, max(0.0, max_kw))
-        return actual, soc - actual * hours * BATTERY_EFFICIENCY / capacity_kwh
-    return 0.0, soc
-
-
-async def _write_battery_setpoint(client: AsyncModbusTcpClient, unit_id: int, setpoint_kw: float) -> None:
-    await client.write_register(address=40012, value=MODBUS_WATCHDOG_S, device_id=unit_id)
-    await client.write_register(address=40010, value=1, device_id=unit_id)  # mode: follow_setpoint
-    await client.write_register(address=40011, value=to_unsigned16(round(setpoint_kw * 1000)), device_id=unit_id)
-
-
-async def _read_battery_telemetry(client: AsyncModbusTcpClient, unit_id: int) -> dict:
-    rr = await client.read_holding_registers(address=40000, count=8, device_id=unit_id)
-    regs = rr.registers
-    return {
-        "soc": regs[0] / 1000.0,
-        "actual_kw": to_signed16(regs[1]) / 1000.0,
-        "terminal_voltage_v": regs[2] / 10.0,
-        "grid_present": bool(regs[3]),
-        "alarm_bits": regs[4],
-    }
-
-
-def _dispatch_battery_sync(unit_id: int, setpoint_kw: float, modbus_host: str, modbus_port: int) -> dict:
-    """One Modbus round trip per call, run from sync code via a fresh
-    event loop — sim/loop.py's own control flow is synchronous (it shares
-    patterns with eval/run_arms.py and gateway/forecast/run.py, both
-    sync), and 96 intervals x 3 phases of short-lived async calls is
-    simpler to reason about than threading the whole file through asyncio.
-    """
-    async def _do():
-        client = AsyncModbusTcpClient(modbus_host, port=modbus_port)
-        await client.connect()
-        try:
-            await _write_battery_setpoint(client, unit_id, setpoint_kw)
-            # SoC comes from bms_step(), not this read, so don't wait 1.3 s for
-            # the mock's physics tick (that alone was ~6 min per recorded day).
-            await asyncio.sleep(0.05)
-            telemetry = await _read_battery_telemetry(client, unit_id)
-        finally:
-            client.close()
-        return telemetry
-
-    return asyncio.run(_do())
+@dataclass(frozen=True)
+class Notice:
+    """A DISCOM load-shedding schedule, published `notice_ts`."""
+    notice_ts: pd.Timestamp
+    start: pd.Timestamp
+    end: pd.Timestamp
+    reason: str = "DISCOM short of power on the evening ramp"
 
 
 def init_run(conn, run_id: str, leo_enabled: bool, seed: int, plan_date: date_cls, notes: str) -> None:
     """Creates (or re-creates) the `run` row every other table's run_id
     foreign key depends on. Must happen before ANYTHING else writes a
     row under this run_id — including cloud/dr_engine.run_dr_event(),
-    which is called before run_one_day() in main() below.
+    which is called before run_day() in main() below.
     """
     sim_start = pd.Timestamp(plan_date, tz="UTC")
     sim_end = sim_start + pd.Timedelta(days=1)
@@ -201,7 +144,7 @@ def init_run(conn, run_id: str, leo_enabled: bool, seed: int, plan_date: date_cl
     cur.close()
 
 
-def run_one_day(
+def run_day(
     conn,
     run_id: str,
     leo_enabled: bool,
@@ -210,23 +153,41 @@ def run_one_day(
     feeder,
     net,
     household_load_full_kw: pd.DataFrame,
+    gross_load_kw: pd.DataFrame,
     approved_plans: dict | None,
     accepted_reduction_kw: dict[str, float],
-    v_limit_pct: float,
-    nominal_v_ln: float,
-    modbus_host: str,
-    modbus_port: int,
+    devices: Field,
     rng: np.random.Generator,
     dr_window: tuple[pd.Timestamp, pd.Timestamp] | None = None,
-    pre_outage: tuple[pd.Timestamp, pd.Timestamp] | None = None,
     load_adjust: dict[str, np.ndarray] | None = None,
-) -> None:
-    """`pre_outage` = (notice_ts, outage_start): from the DISCOM's load-
-    shedding notice until the outage, every block holds charge and tops up
-    toward PRE_OUTAGE_SOC_TARGET instead of following the plan (§9.3)."""
-    sim_start = pd.Timestamp(plan_date, tz="UTC")
-    target_ts = pd.date_range(sim_start + pd.Timedelta(minutes=15), periods=96, freq="15min")
-    capacity_by_phase = {b["phase"]: b["capacity_kwh"] for b in scenario["battery_blocks"]}
+    outages: tuple[Outage, ...] = (),
+    notice: Notice | None = None,
+    forecast_run_id: str = "normal",
+) -> dict:
+    """One simulated day, with every LEO decision made by the edge gateway.
+
+    The world owns the truth: household loads (net of rooftop PV, minus
+    whatever DR households actually delivered), outages, the three-phase
+    power flow, fuse trips. Per 15-minute interval:
+
+      1. the sensors transmit (sim/field.py): last interval's voltages,
+         the busbar CTs' phase load now, power-fail / restore events;
+      2. the clock moves and the gateway acts (reads its devices, writes
+         setpoints and backup limits) — an outage or a DISCOM notice
+         mid-interval gets its own tick at the exact moment;
+      3. the inverters advance (BMS, anti-islanding, backup port);
+      4. the power flow runs with what the batteries actually did;
+      5. sustained conductor overload trips the phase's fuse.
+
+    `household_load_full_kw` is keyed by bus id (net load), `gross_load_kw`
+    by household id (what a backup premise wants to draw). With
+    `leo_enabled` False the gateway runs in shadow mode and the batteries
+    are not used: the no-LEO baseline.
+    """
+    nb = scenario["neighbourhood"]
+    v_limit_pct, nominal_v_ln = nb["v_limit_pct"], nb["nominal_v_ln"]
+    day_start = pd.Timestamp(plan_date, tz="UTC")
+    target_ts = pd.date_range(day_start + INTERVAL, periods=96, freq="15min")
 
     cur = conn.cursor()
     if leo_enabled and approved_plans is not None:
@@ -241,133 +202,156 @@ def run_one_day(
                 )
         conn.commit()
 
-    bus_id_by_hhid = dict(zip(feeder.household["id"], feeder.household["bus_id"]))
-    far_end_sensor_bus = {
-        row["phase"]: row["bus_id"]
-        for _, row in feeder.sensor[feeder.sensor["placement"] == "far_end"].iterrows()
-    }
+    devices.pause_clock()
+    devices.install({b["phase"]: (b["capacity_kwh"], b["power_kw"]) for b in scenario["battery_blocks"]})
+    devices.gateway_start(run_id, plan_date, control=leo_enabled, plan_run_id=run_id, forecast_run_id=forecast_run_id)
 
-    state = ArmState()
+    bus_id_by_hhid = dict(zip(feeder.household["id"], feeder.household["bus_id"]))
+    hh_bus_by_phase = {p: feeder.household.loc[feeder.household["phase"] == p, "bus_id"].tolist() for p in PHASES}
+    sensors = list(feeder.sensor.itertuples())
+    premises_by_phase = {p: devices.premises.loc[devices.premises["phase"] == p, "household_id"].tolist() for p in PHASES}
     root_idx = get_bus_index(net, feeder.root)
-    far_end_idx = {p: get_bus_index(net, b) for p, b in far_end_sensor_bus.items()}
-    bus_by_phase = {p: feeder.household.loc[feeder.household["phase"] == p, "bus_id"].tolist() for p in PHASES}
-    local_hour = ((target_ts.hour + target_ts.minute / 60.0 + IST_OFFSET_HOURS) % 24).to_numpy()
-    dvdp: dict[str, float] = {}
-    bias = {p: 0.0 for p in PHASES}
-    reserve_soc = {p: SOC_MIN for p in PHASES}
-    if pre_outage is not None:
-        from gateway.outage import register_backup_premises
-        backup = register_backup_premises(feeder.household)
-        backup["phase"] = backup["household_id"].map(dict(zip(feeder.household["id"], feeder.household["phase"])))
-        cut_h = PRE_OUTAGE_CUT_HOURS
-        for p in PHASES:
-            need_kwh = 1.5 * float((backup.loc[backup["phase"] == p, "max_current_a"] * nominal_v_ln / 1000.0).sum()) * cut_h
-            cap = next(b["capacity_kwh"] for b in scenario["battery_blocks"] if b["phase"] == p)
-            reserve_soc[p] = min(PRE_OUTAGE_SOC_TARGET, max(SOC_MIN, 0.05 + need_kwh / (cap * BATTERY_EFFICIENCY)))
+    state = ArmState()
+    meter_kwh = {h: 0.0 for h in devices.premises["household_id"]}
+
+    def voltages_now(violations: pd.DataFrame) -> dict:
+        v = violations.set_index(["bus_id", "phase"])["voltage_v"]
+        return {s.id: float(v.get((str(s.bus_id), s.phase), nominal_v_ln)) for s in sensors}
+
+    # What the sensors saw just before the day starts: the first interval's
+    # load with the batteries idle.
+    first = household_load_full_kw.loc[target_ts[0]].to_dict() if target_ts[0] in household_load_full_kw.index else {}
+    update_household_loads(net, feeder, first)
+    run_power_flow(net)
+    prev_v = voltages_now(detect_violations(net, v_limit_pct))
 
     n_trips = 0
     for i, ts in enumerate(target_ts):
+        start = ts - INTERVAL
         loads = household_load_full_kw.loc[ts].to_dict() if ts in household_load_full_kw.index else {}
 
         for phase in PHASES:
             if state.trip_until[phase] is not None and ts < state.trip_until[phase]:
-                for bus_id in feeder.household.loc[feeder.household["phase"] == phase, "bus_id"]:
+                for bus_id in hh_bus_by_phase[phase]:
                     loads[bus_id] = 0.0
             elif state.trip_until[phase] is not None and ts >= state.trip_until[phase]:
                 state.trip_until[phase] = None
                 state.consecutive_overload[phase] = 0
 
-        # Only inside the DR window. This used to apply all 96 intervals,
-        # giving the LEO run a full day of demand reduction from a 2-hour
-        # event (write_meter_intervals already checked the window, so the
-        # meters and the power flow disagreed).
+        # DR only inside its window; automated DR as per-bus adjustments.
         in_dr_window = dr_window is not None and dr_window[0] <= ts < dr_window[1]
         if leo_enabled and accepted_reduction_kw and in_dr_window:
             for hh_id, reduction_kw in accepted_reduction_kw.items():
                 bus_id = bus_id_by_hhid.get(hh_id)
                 if bus_id in loads:
                     loads[bus_id] = loads[bus_id] - reduction_kw
-        # Automated DR (pump shifting, AC events): per-bus kW to subtract.
         if leo_enabled and load_adjust:
             for bus_id, adj in load_adjust.items():
                 if bus_id in loads:
                     loads[bus_id] = loads[bus_id] - float(adj[i])
 
+        def phase_up(p: str, at) -> bool:
+            return not any(o.down_at(at) and p in o.phases for o in outages)
+
+        # Moments inside this interval where something happens to LEO.
+        cuts = {start}
+        for o in outages:
+            cuts |= {x for x in (o.start, o.end) if start < x < ts}
+        if notice is not None and start < notice.notice_ts < ts:
+            cuts.add(notice.notice_ts)
+        cuts = sorted(cuts)
+
+        energy_kwh = {p: 0.0 for p in PHASES}
+        for k, a in enumerate(cuts):
+            b = cuts[k + 1] if k + 1 < len(cuts) else ts
+            if leo_enabled and notice is not None and a == notice.notice_ts:
+                devices.relay_notice(notice.notice_ts, notice.start, notice.end, notice.reason)
+            for o in outages:
+                if a in (o.start, o.end):
+                    back = a == o.end
+                    for p in o.phases:
+                        devices.set_grid(p, back)
+                    for s in sensors:
+                        if s.phase in o.phases:
+                            devices.power_event(s, a, "power_restore" if back else "power_fail",
+                                                None if back else prev_v.get(s.id))
+            if a == start:
+                for s in sensors:
+                    tripped_far = s.placement == "far_end" and state.trip_until[s.phase] is not None
+                    supply = phase_up(s.phase, a) and not tripped_far
+                    reading = measure.sensor_reading(prev_v.get(s.id) or nominal_v_ln, supply, rng)
+                    if reading is None:
+                        continue  # a LoRa packet that never arrives
+                    ct = None
+                    if s.placement == "busbar" and supply:
+                        ct = ct_reading(sum(loads.get(bus, 0.0) for bus in hh_bus_by_phase[s.phase]), rng)
+                    devices.uplink(s, a, reading["voltage_v"] if prev_v.get(s.id) is not None else None, supply, ct)
+            devices.tick(a)
+
+            if not leo_enabled:
+                continue
+            # Backup circuit: each premise draws what it wants up to the
+            # limit the gateway set on its meter; the block supplies what it can.
+            want = {}
+            for p in PHASES:
+                total = 0.0
+                if not phase_up(p, a):
+                    for h in premises_by_phase[p]:
+                        gross = max(0.0, float(gross_load_kw.at[ts, h])) if h in gross_load_kw.columns else 0.0
+                        lim = devices.premise_limit_kw(h)
+                        want[h] = (p, min(gross, lim), gross > lim + 1e-9)
+                        total += want[h][1]
+                devices.set_backup_demand(p, total)
+            seg_h = (b - a).total_seconds() / 3600.0
+            tel = devices.advance(PHASES, (b - a).total_seconds())
+            for p in PHASES:
+                energy_kwh[p] += tel[p]["power_kw"] * seg_h
+            demand_by_phase = {p: sum(w[1] for w in want.values() if w[0] == p) for p in PHASES}
+            for h, (p, kw, limited) in want.items():
+                frac = tel[p]["backup_kw"] / demand_by_phase[p] if demand_by_phase[p] > 0 else 0.0
+                draw = kw * frac
+                meter_kwh[h] += draw * seg_h
+                devices.meter_record(h, meter_kwh[h], draw * 1000.0 / nominal_v_ln, limited)
+            for o in outages:  # premises back on the grid: their backup meters go quiet
+                if a == o.end:
+                    for p in o.phases:
+                        for h in premises_by_phase[p]:
+                            devices.meter_record(h, meter_kwh[h], 0.0, False)
+
+        # ---- the power flow, with what the batteries actually did.
+        down = [p for p in PHASES if any(o.covers_interval(ts) and p in o.phases for o in outages)]
+        if len(down) == len(PHASES):
+            prev_v = {s.id: None for s in sensors}
+            conn.commit()
+            continue
+        for p in down:
+            for bus_id in hh_bus_by_phase[p]:
+                loads[bus_id] = 0.0
         update_household_loads(net, feeder, loads)
-
         sgen_indices = []
-        dispatch_rows = []
-        if leo_enabled and approved_plans is not None:
-            # One pre-dispatch solve stands in for the sensors' latest reading
-            # (busbar CT + voltage, far-end voltage) for all three phases.
-            run_power_flow(net)
-            res = net.res_bus_3ph
-            for phase in PHASES:
-                if state.trip_until[phase] is not None:
-                    continue
-                plan = approved_plans[phase]
-                planned_kw = plan["intervals"][i]["setpoint_kw"]
-                letter = PHASE_LETTER[phase]
-                block = next(b for b in scenario["battery_blocks"] if b["phase"] == phase)
-                cap = block["capacity_kwh"]
-                if phase not in dvdp:
-                    dvdp[phase] = compute_phase_limits(net, feeder.root, phase, v_limit_pct, block["power_kw"]).dv_dp_pu_per_kw
-                limits = linear_phase_limits(net, root_idx, phase, v_limit_pct, block["power_kw"], dvdp[phase])
-                far_end_v = float(res.at[far_end_idx[phase], f"vm_{letter}_pu"]) * nominal_v_ln
-                measured_kw = float(sum(loads.get(b, 0.0) for b in bus_by_phase[phase]))
-                forecast_p50 = np.asarray(plan["forecast_p50_kw"])
-
-                mode = "normal"
-                if pre_outage is not None and pre_outage[0] <= ts < pre_outage[1]:
-                    # §9.3 Pre-outage: raise the floor to what the backup
-                    # premises need through the announced cut (+50%), top
-                    # up to it, and keep shaving the peak with the rest.
-                    mode = "pre_outage"
-                    floor = reserve_soc[phase]
-                    if state.soc[phase] < floor:
-                        setpoint_kw, rule = -limits.max_charge_kw, "pre_outage_reserve"
-                    else:
-                        setpoint_kw, rule = live_setpoint(i, measured_kw, forecast_p50, bias[phase], local_hour,
-                                                          state.soc[phase], cap, block["power_kw"], floor, SOC_MAX,
-                                                          BATTERY_EFFICIENCY)
-                else:
-                    setpoint_kw, rule = live_setpoint(i, measured_kw, forecast_p50, bias[phase], local_hour,
-                                                      state.soc[phase], cap, block["power_kw"], SOC_MIN, SOC_MAX,
-                                                      BATTERY_EFFICIENCY)
-                    upper = nominal_v_ln * (1 + v_limit_pct / 100.0)
-                    if far_end_v > upper and state.soc[phase] < SOC_MAX:
-                        setpoint_kw, rule = min(setpoint_kw, -limits.max_charge_kw), "overvoltage"
-                setpoint_kw = float(np.clip(setpoint_kw, -limits.max_charge_kw, limits.max_discharge_kw))
-                bias[phase] = measured_kw - float(forecast_p50[i])
-
-                # Real Modbus write (transport + watchdog fidelity) ...
-                _dispatch_battery_sync(UNIT_ID_BY_PHASE[phase], setpoint_kw, modbus_host, modbus_port)
-                # ... energy accounting at the recorded interval length.
-                actual_kw, state.soc[phase] = bms_step(state.soc[phase], setpoint_kw, cap)
-
-                if actual_kw != 0:
-                    idx = pp.create_asymmetric_sgen(net, bus=root_idx, **{f"p_{letter}_mw": actual_kw / 1000.0})
-                    sgen_indices.append(idx)
-
-                dispatch_rows.append((phase, planned_kw, actual_kw, state.soc[phase], rule, mode))
-
+        if leo_enabled:
+            for p in PHASES:
+                kw = energy_kwh[p] / 0.25
+                if p not in down and abs(kw) > 1e-9:
+                    sgen_indices.append(pp.create_asymmetric_sgen(
+                        net, bus=root_idx, **{f"p_{PHASE_LETTER[p]}_mw": kw / 1000.0}))
         run_power_flow(net)
         violations = detect_violations(net, v_limit_pct)
+        if sgen_indices:
+            net.asymmetric_sgen.drop(sgen_indices, inplace=True)
 
         for phase in PHASES:
             phase_v = violations[violations["phase"] == phase]
             # Fuse trip is on conductor (line) loading only. The busbar row
-            # now carries the TRANSFORMER's loading, which runs 150%+ every
-            # evening on this day: Indian DTs routinely ride that for hours
-            # (thermal time constant, HRC fuses sized above rating) and fail
-            # by ageing, not an instant trip. It's reported as an overload
-            # event, not modelled as a trip.
+            # carries the TRANSFORMER's loading, which runs 150%+ every
+            # evening: Indian DTs ride that for hours (thermal time constant,
+            # HRC fuses sized above rating) and fail by ageing, not an
+            # instant trip. It's reported as an overload event, not a trip.
             line_v = phase_v[phase_v["bus_id"] != str(feeder.root)]
             max_loading = line_v["loading_pct"].max() if not line_v.empty and line_v["loading_pct"].notna().any() else 0.0
             if max_loading is None or (isinstance(max_loading, float) and np.isnan(max_loading)):
                 max_loading = 0.0
-
-            if max_loading > TRIP_THRESHOLD_PCT and state.trip_until[phase] is None:
+            if phase not in down and max_loading > TRIP_THRESHOLD_PCT and state.trip_until[phase] is None:
                 state.consecutive_overload[phase] += 1
                 if state.consecutive_overload[phase] >= TRIP_CONSECUTIVE_INTERVALS:
                     state.trip_until[phase] = ts + pd.Timedelta(minutes=15 * TRIP_REPAIR_INTERVALS)
@@ -380,50 +364,31 @@ def run_one_day(
                     )
             else:
                 state.consecutive_overload[phase] = 0
-
-            for _, row in phase_v.iterrows():
+            if phase in down:
+                continue
+            for row in phase_v.itertuples():
                 cur.execute(
                     """INSERT INTO network_result (run_id, ts_end, bus_id, phase, voltage_v,
                            loading_pct, violation, is_forecast)
                        VALUES (%s,%s,%s,%s,%s,%s,%s,FALSE)
                        ON CONFLICT (run_id, ts_end, bus_id, phase, is_forecast) DO NOTHING""",
-                    (run_id, ts.to_pydatetime(), row["bus_id"], phase, row["voltage_v"],
-                     row["loading_pct"], bool(row["violation"])),
+                    (run_id, ts.to_pydatetime(), row.bus_id, phase, row.voltage_v,
+                     None if row.loading_pct is None or pd.isna(row.loading_pct) else float(row.loading_pct),
+                     bool(row.violation)),
                 )
-
-        for phase, planned_kw, actual_kw, soc, rule, mode in dispatch_rows:
-            block_id = f"BATT-{phase}"
-            cur.execute(
-                """INSERT INTO dispatch (run_id, block_id, ts_end, setpoint_kw, actual_kw,
-                       soc_after, mode, rule_triggered)
-                   VALUES (%s,%s,%s,%s,%s,%s,%s,%s)""",
-                (run_id, block_id, ts.to_pydatetime(), planned_kw, actual_kw, soc, mode, rule),
-            )
-
-        if sgen_indices:
-            net.asymmetric_sgen.drop(sgen_indices, inplace=True)
-
-        for _, sensor_row in feeder.sensor.iterrows():
-            bus_v_row = violations[(violations["bus_id"] == sensor_row["bus_id"]) & (violations["phase"] == sensor_row["phase"])]
-            true_v = float(bus_v_row["voltage_v"].iloc[0]) if not bus_v_row.empty else nominal_v_ln
-            supply_present = state.trip_until[sensor_row["phase"]] is None
-            reading = measure.sensor_reading(true_v, supply_present, rng)
-            if reading is not None:
-                cur.execute(
-                    """INSERT INTO sensor_reading (run_id, sensor_id, ts_end, voltage_v, supply_present, provenance)
-                       VALUES (%s,%s,%s,%s,%s,%s)
-                       ON CONFLICT (run_id, sensor_id, ts_end) DO NOTHING""",
-                    (run_id, sensor_row["id"], ts.to_pydatetime(), reading["voltage_v"],
-                     reading["supply_present"], reading["provenance"]),
-                )
-
+        prev_v = voltages_now(violations)
+        for s in sensors:
+            if s.phase in down:
+                prev_v[s.id] = None
         conn.commit()
-
         if i % 24 == 0:
-            print(f"  {run_id}: {ts} done ({i+1}/96), trips so far: {n_trips}")
+            print(f"  {run_id}: {ts} done ({i+1}/96), trips so far: {n_trips}", flush=True)
 
+    devices.tick(target_ts[-1])  # closes the last interval: the gateway records its dispatch
+    devices.gateway_stop()
     cur.close()
-    print(f"{run_id}: finished, {n_trips} overload trip(s) over the day")
+    print(f"{run_id}: finished, {n_trips} overload trip(s), {devices.missed_acks} missed gateway ack(s)")
+    return {"trips": n_trips, "missed_acks": devices.missed_acks}
 
 
 def write_meter_intervals(
@@ -449,7 +414,7 @@ def write_meter_intervals(
     DR window — not reflected in `true_load` itself, since personas.py's
     response is applied only at settlement/dispatch time (Day 3) — so
     its metered import is reduced here too, for exactly the same reason
-    run_one_day() reduces that household's network load: a meter and a
+    run_day() reduces that household's network load: a meter and a
     power flow must agree on what happened.
     """
     cur = conn.cursor()
@@ -484,195 +449,6 @@ def write_meter_intervals(
             )
     conn.commit()
     cur.close()
-
-
-def run_outage_day(
-    conn,
-    run_id: str,
-    plan_date: date_cls,
-    scenario: dict,
-    feeder,
-    outage_start: pd.Timestamp,
-    outage_end: pd.Timestamp,
-    rng: np.random.Generator,
-    source_run_id: str = "normal",
-    cause: str = "upstream_fault",
-) -> dict:
-    """An outage overlaid on a recorded day (Build Spec v1.0 §7.4, §7.6).
-
-    Two shapes:
-      - unplanned (`source_run_id` != `run_id`): a fresh run that copies
-        everything outside the outage window from the source run, since
-        nothing about those intervals differs;
-      - planned load shedding (`source_run_id == run_id`): run_one_day has
-        already simulated the whole day for this run (including the
-        Pre-outage hours); only the outage window is replaced here.
-
-    During the outage there is no grid source for runpp_3ph to solve
-    against, so no network_result rows exist for it — the backup circuit
-    is a separate, physically disconnected circuit (anti-islanding, §C2).
-    Sensors report no supply. Backup power is sized from the battery's
-    ACTUAL state of charge when the grid drops (down to a 5% hard floor),
-    not a fixed reserve — which is exactly why Pre-outage pre-charging
-    matters.
-    """
-    from gateway.outage import register_backup_premises, allocate_backup_power, stage_restoration
-    from gateway.orchestrator.modes import ModeState, transition
-
-    window = (outage_start.to_pydatetime(), outage_end.to_pydatetime())
-    cur = conn.cursor()
-
-    if source_run_id != run_id:
-        init_run(conn, run_id, True, scenario["sim"]["seed"], plan_date,
-                 f"sim/loop.py recorded run: unplanned {cause} {outage_start}–{outage_end}")
-        cur.execute(
-            """INSERT INTO plan (run_id, plan_date, phase, ts_end, setpoint_kw, mode, planner,
-                   reserve_kwh, approved_at, approved_by)
-               SELECT %s, plan_date, phase, ts_end, setpoint_kw, mode, planner, reserve_kwh, approved_at, approved_by
-               FROM plan WHERE run_id = %s""",
-            (run_id, source_run_id),
-        )
-        for table, cols in [
-            ("dispatch", "block_id, ts_end, setpoint_kw, actual_kw, soc_after, mode, rule_triggered"),
-            ("network_result", "ts_end, bus_id, phase, voltage_v, loading_pct, violation, is_forecast"),
-            ("sensor_reading", "sensor_id, ts_end, voltage_v, supply_present, provenance"),
-        ]:
-            cur.execute(
-                f"""INSERT INTO {table} (run_id, {cols}) SELECT %s, {cols} FROM {table}
-                    WHERE run_id = %s AND (ts_end <= %s OR ts_end > %s)""",
-                (run_id, source_run_id, *window),
-            )
-        cur.execute(
-            """INSERT INTO event (run_id, ts, kind, scope, source, payload)
-               SELECT %s, ts, kind, scope, source, payload FROM event
-               WHERE run_id = %s AND kind IN ('dr_event_start','dr_event_end','dr_auto_shift','dr_auto_ac')""",
-            (run_id, source_run_id),
-        )
-        copy_dr_rows(conn, source_run_id, run_id)
-    else:
-        # run_one_day simulated these intervals as if the grid were up.
-        for table in ("dispatch", "network_result", "sensor_reading"):
-            cur.execute(f"DELETE FROM {table} WHERE run_id = %s AND ts_end > %s AND ts_end <= %s", (run_id, *window))
-    conn.commit()
-
-    # State of charge on each block at the moment the grid drops.
-    cur.execute(
-        """SELECT DISTINCT ON (block_id) block_id, soc_after FROM dispatch
-           WHERE run_id = %s AND ts_end <= %s ORDER BY block_id, ts_end DESC""",
-        (run_id, window[0]),
-    )
-    soc_at_loss = {r[0].replace("BATT-", ""): float(r[1]) for r in cur.fetchall()}
-
-    cur.execute(
-        "INSERT INTO event (run_id, ts, kind, scope, source, payload) VALUES (%s,%s,'grid_loss','upstream','sim',%s)",
-        (run_id, window[0], psycopg2.extras.Json({"cause": cause})),
-    )
-    for phase in PHASES:
-        cur.execute(
-            "INSERT INTO event (run_id, ts, kind, scope, source, payload) VALUES (%s,%s,'power_fail',%s,'sensor',%s)",
-            (run_id, window[0], f"phase:{phase}", psycopg2.extras.Json({})),
-        )
-
-    # Modes: a load-shedding run is already in pre_outage (set by the notice).
-    cur.execute("SELECT to_mode FROM mode_transition WHERE run_id = %s ORDER BY ts DESC LIMIT 1", (run_id,))
-    last = cur.fetchone()
-    mode_state = ModeState(mode=last[0] if last else "normal")
-    mode_state, tr = transition(mode_state, window[0], grid_lost=True)
-    cur.execute(
-        "INSERT INTO mode_transition (run_id, ts, from_mode, to_mode, owner, reason) VALUES (%s,%s,%s,%s,%s,%s)",
-        (run_id, tr.ts, tr.from_mode, tr.to_mode, tr.owner, tr.reason),
-    )
-
-    premise_backup = register_backup_premises(feeder.household)
-    household_phase_by_id = dict(zip(feeder.household["id"], feeder.household["phase"]))
-    nominal_v_ln = scenario["neighbourhood"]["nominal_v_ln"]
-    outage_hours = (outage_end - outage_start).total_seconds() / 3600.0
-    capacity = {b["phase"]: b["capacity_kwh"] for b in scenario["battery_blocks"]}
-    BACKUP_HARD_FLOOR = 0.05
-    available_kwh_by_phase = {
-        p: max(0.0, soc_at_loss.get(p, SOC_MIN) - BACKUP_HARD_FLOOR) * capacity[p] for p in capacity
-    }
-    available_kw_by_phase = {p: e / max(outage_hours, 0.25) for p, e in available_kwh_by_phase.items()}
-    allocations = allocate_backup_power(premise_backup, household_phase_by_id, available_kw_by_phase, nominal_v_ln)
-
-    cur.execute(
-        "INSERT INTO event (run_id, ts, kind, scope, source, payload) VALUES (%s,%s,'backup_start','upstream','sim',%s)",
-        (run_id, window[0], psycopg2.extras.Json({
-            "n_premises": len(allocations),
-            "total_kw": sum(a.allocated_kw for a in allocations),
-            "premises": [{"household_id": a.household_id, "phase": a.phase, "allocated_kw": a.allocated_kw,
-                          "max_kw": a.max_kw, "priority_class": a.priority_class} for a in allocations],
-            "soc_at_loss": soc_at_loss, "available_kwh_by_phase": available_kwh_by_phase,
-        })),
-    )
-
-    sim_start = pd.Timestamp(plan_date, tz="UTC")
-    target_ts = pd.date_range(sim_start + pd.Timedelta(minutes=15), periods=96, freq="15min")
-    outage_intervals = [ts for ts in target_ts if outage_start < ts <= outage_end]
-    for alloc in allocations:
-        current_a = alloc.allocated_kw * 1000.0 / nominal_v_ln
-        for ts in outage_intervals:
-            cur.execute(
-                """INSERT INTO premise_meter (run_id, household_id, ts_end, backup_kwh, current_a, limit_active)
-                   VALUES (%s,%s,%s,%s,%s,%s)
-                   ON CONFLICT (run_id, household_id, ts_end) DO NOTHING""",
-                (run_id, alloc.household_id, ts.to_pydatetime(), alloc.allocated_kw * 0.25, current_a,
-                 alloc.allocated_kw < alloc.max_kw),
-            )
-    # Sensors are on the dead grid: they report no supply, not 0 V.
-    for _, s in feeder.sensor.iterrows():
-        for ts in outage_intervals:
-            cur.execute(
-                """INSERT INTO sensor_reading (run_id, sensor_id, ts_end, voltage_v, supply_present, provenance)
-                   VALUES (%s,%s,%s,NULL,FALSE,'measured') ON CONFLICT DO NOTHING""",
-                (run_id, s["id"], ts.to_pydatetime()),
-            )
-    # Battery blocks serve only their backup port during the outage.
-    for p in PHASES:
-        soc = soc_at_loss.get(p, SOC_MIN)
-        per_interval_kwh = sum(a.allocated_kw for a in allocations if a.phase == p) * 0.25
-        for ts in outage_intervals:
-            soc = max(BACKUP_HARD_FLOOR, soc - per_interval_kwh / capacity[p])
-            cur.execute(
-                """INSERT INTO dispatch (run_id, block_id, ts_end, setpoint_kw, actual_kw, soc_after, mode, rule_triggered)
-                   VALUES (%s,%s,%s,0,0,%s,'backup',NULL)""",
-                (run_id, f"BATT-{p}", ts.to_pydatetime(), soc),
-            )
-
-    cur.execute(
-        "INSERT INTO event (run_id, ts, kind, scope, source, payload) VALUES (%s,%s,'grid_return','upstream','sim',%s)",
-        (run_id, window[1], psycopg2.extras.Json({})),
-    )
-    mode_state, tr = transition(mode_state, window[1], grid_returned=True)
-    cur.execute(
-        "INSERT INTO mode_transition (run_id, ts, from_mode, to_mode, owner, reason) VALUES (%s,%s,%s,%s,%s,%s)",
-        (run_id, tr.ts, tr.from_mode, tr.to_mode, tr.owner, tr.reason),
-    )
-
-    batches = stage_restoration(premise_backup)
-    batch_gap = timedelta(minutes=3)
-    for i, batch in enumerate(batches):
-        cur.execute(
-            "INSERT INTO event (run_id, ts, kind, scope, source, payload) VALUES (%s,%s,'restore','upstream','sim',%s)",
-            (run_id, window[1] + i * batch_gap, psycopg2.extras.Json({"batch": i, "household_ids": batch})),
-        )
-    restoration_complete_ts = window[1] + len(batches) * batch_gap
-    cur.execute(
-        "INSERT INTO event (run_id, ts, kind, scope, source, payload) VALUES (%s,%s,'backup_end','upstream','sim',%s)",
-        (run_id, restoration_complete_ts, psycopg2.extras.Json({})),
-    )
-    mode_state, tr = transition(mode_state, restoration_complete_ts, restoration_complete=True)
-    cur.execute(
-        "INSERT INTO mode_transition (run_id, ts, from_mode, to_mode, owner, reason) VALUES (%s,%s,%s,%s,%s,%s)",
-        (run_id, tr.ts, tr.from_mode, tr.to_mode, tr.owner, tr.reason),
-    )
-
-    conn.commit()
-    cur.close()
-    print(f"{run_id}: {cause} {outage_start}-{outage_end}, SoC at loss {soc_at_loss}, "
-          f"{len(allocations)} premises on backup ({sum(a.allocated_kw for a in allocations):.2f} kW), "
-          f"{len(batches)} restoration batches")
-    return {"n_premises": len(allocations), "allocations": allocations, "batches": batches}
 
 
 def persist_forecast(conn, run_id: str, artifacts: dict, dt_id: str) -> None:
@@ -893,8 +669,7 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--plan-date", default="2026-04-27", help="the confirmed annual peak-demand day")
     parser.add_argument("--normal-baseline", action=argparse.BooleanOptionalAction, default=True,
-                         help="run the Modbus-driven 'normal'/'baseline' day (slow, ~10 min); "
-                              "disable to only (re)run the outage day against an existing 'normal' run")
+                         help="record the 'normal' (LEO) and 'baseline' (no LEO) peak days")
     parser.add_argument("--outage", action=argparse.BooleanOptionalAction, default=True,
                          help="produce the 'outage' recorded run")
     parser.add_argument("--meters", action=argparse.BooleanOptionalAction, default=True,
@@ -907,9 +682,6 @@ def main() -> None:
                          help="sunniest light-load day (lowest midday feeder net load of the year)")
     args = parser.parse_args()
     plan_date = date_cls.fromisoformat(args.plan_date)
-
-    modbus_host = os.environ.get("MODBUS_HOST", "localhost")
-    modbus_port = int(os.environ.get("MODBUS_PORT", "5020"))
 
     scenario = load_scenario()
     nb = scenario["neighbourhood"]
@@ -965,6 +737,25 @@ def main() -> None:
     conn = db_connect()
     print("seeding default consent (all households, dr_offers granted)...")
     ensure_default_consent(conn)
+
+    # The world's side of LEO's devices; every decision below is the gateway's.
+    cur = conn.cursor()
+    cur.execute("""SELECT pb.household_id, h.phase::text AS phase FROM premise_backup pb
+                   JOIN household h ON h.id = pb.household_id ORDER BY pb.household_id""")
+    premises = pd.DataFrame(cur.fetchall(), columns=["household_id", "phase"])
+    cur.close()
+    devices = Field(feeder.sensor, premises, nb["nominal_v_ln"])
+    devices.connect()
+    seed = scenario["sim"]["seed"]
+
+    def world_rng() -> np.random.Generator:
+        """Sensor noise and dropouts: the same draws in every run of the
+        day, so runs differ only where LEO's actions (or an outage) do."""
+        return np.random.default_rng(seed + 100)
+
+    def record_day(run_id: str, leo: bool, date_, plans, reductions, **kw):
+        return run_day(conn, run_id, leo, date_, scenario, feeder, net, net_load, true_load, plans, reductions,
+                       devices, world_rng(), **kw)
 
     # Must exist before anything (including the DR event below) writes a
     # row under run_id="normal" — see init_run()'s docstring. Only when
@@ -1140,11 +931,8 @@ def main() -> None:
     if args.normal_baseline:
         print("\n=== LEO-on run ('normal') ===")
         t0 = time.perf_counter()
-        run_one_day(
-            conn, "normal", True, plan_date, scenario, feeder, net, net_load, approved_plans, accepted_reduction_kw,
-            nb["v_limit_pct"], nb["nominal_v_ln"], modbus_host, modbus_port, rng,
-            dr_window=(window_start, window_end), load_adjust=auto_adjust,
-        )
+        record_day("normal", True, plan_date, approved_plans, accepted_reduction_kw,
+            dr_window=(window_start, window_end), load_adjust=auto_adjust)
         write_dr_window_events(conn, "normal", dr_result, window_start, window_end, len(accepted_reduction_kw))
         write_auto_dr_events(conn, "normal", auto_summary, approval_ts, window_start)
         print(f"took {time.perf_counter()-t0:.1f}s")
@@ -1153,10 +941,7 @@ def main() -> None:
         init_run(conn, "baseline", False, scenario["sim"]["seed"], plan_date,
                  "sim/loop.py recorded run (baseline: battery disabled)")
         t0 = time.perf_counter()
-        run_one_day(
-            conn, "baseline", False, plan_date, scenario, feeder, net, net_load, None, {},
-            nb["v_limit_pct"], nb["nominal_v_ln"], modbus_host, modbus_port, rng,
-        )
+        record_day("baseline", False, plan_date, None, {})
         print(f"took {time.perf_counter()-t0:.1f}s")
 
     if args.meters:
@@ -1176,48 +961,40 @@ def main() -> None:
 
     if args.outage:
         print("\n=== unplanned outage run ('outage') ===")
-        run_outage_day(conn, "outage", plan_date, scenario, feeder, outage_start, outage_end, rng,
-                       source_run_id="normal", cause="upstream_fault")
+        init_run(conn, "outage", True, seed, plan_date,
+                 f"sim/loop.py recorded run: unplanned upstream fault {outage_start}–{outage_end}")
+        copy_dr_rows(conn, "normal", "outage")
+        record_day("outage", True, plan_date, approved_plans, accepted_reduction_kw,
+            dr_window=(window_start, window_end), load_adjust=auto_adjust,
+            outages=(Outage(outage_start, outage_end),))
+        write_dr_window_events(conn, "outage", dr_result, window_start, window_end, len(accepted_reduction_kw))
+        write_auto_dr_events(conn, "outage", auto_summary, approval_ts, window_start)
 
     if args.load_shedding:
-        # §14 "Load shedding": the DISCOM publishes a schedule; LEO enters
-        # Pre-outage on the notice (§9.3), raises the reserve on all three
-        # blocks and alerts households, then the cut happens on schedule.
-        from gateway.orchestrator.modes import ModeState, transition
+        # §14 "Load shedding": the DISCOM publishes a schedule at 14:00; the
+        # cloud relays it to the gateway, which enters Pre-outage and raises
+        # each block's reserve (the gateway records the notice and the mode
+        # change); the cloud SMSes households; the cut happens on schedule.
         print("\n=== planned load-shedding run ('load_shedding') ===")
-        notice_ts = pd.Timestamp(plan_date, tz="UTC") + pd.Timedelta(hours=14 - 5, minutes=0 - 30)
-        init_run(conn, "load_shedding", True, scenario["sim"]["seed"], plan_date,
-                 f"sim/loop.py recorded run: DISCOM load-shedding notice {notice_ts}, cut {outage_start}–{outage_end}")
+        notice = Notice(pd.Timestamp(plan_date, tz="UTC") + pd.Timedelta(hours=14 - 5, minutes=0 - 30),
+                        outage_start, outage_end)
+        init_run(conn, "load_shedding", True, seed, plan_date,
+                 f"sim/loop.py recorded run: DISCOM load-shedding notice {notice.notice_ts}, cut {outage_start}–{outage_end}")
         copy_dr_rows(conn, "normal", "load_shedding")
+        record_day("load_shedding", True, plan_date, approved_plans, accepted_reduction_kw,
+            dr_window=(window_start, window_end), load_adjust=auto_adjust,
+            outages=(Outage(outage_start, outage_end),), notice=notice)
         cur = conn.cursor()
         cur.execute(
-            "INSERT INTO event (run_id, ts, kind, scope, source, payload) VALUES (%s,%s,'load_shedding_notice','upstream','discom',%s)",
-            ("load_shedding", notice_ts.to_pydatetime(), psycopg2.extras.Json({
-                "scheduled_start": outage_start.isoformat(), "scheduled_end": outage_end.isoformat(),
-                "reason": "DISCOM short of power on the evening ramp"})),
-        )
-        _, tr = transition(ModeState(mode="normal"), notice_ts.to_pydatetime(), pre_outage_risk=True)
-        cur.execute(
-            "INSERT INTO mode_transition (run_id, ts, from_mode, to_mode, owner, reason) VALUES (%s,%s,%s,%s,%s,%s)",
-            ("load_shedding", tr.ts, tr.from_mode, tr.to_mode, tr.owner, "DISCOM load-shedding notice"),
-        )
-        cur.execute(
             "INSERT INTO event (run_id, ts, kind, scope, source, payload) VALUES (%s,%s,'alert_sent','all','leo',%s)",
-            ("load_shedding", (notice_ts + pd.Timedelta(minutes=5)).to_pydatetime(), psycopg2.extras.Json({
+            ("load_shedding", (notice.notice_ts + pd.Timedelta(minutes=5)).to_pydatetime(), psycopg2.extras.Json({
                 "n_households": int(len(feeder.household)), "channel": "sms",
                 "message": "Scheduled power cut 19:40-21:10 tonight. Please charge phones and home inverters now."})),
         )
         conn.commit()
         cur.close()
-        run_one_day(
-            conn, "load_shedding", True, plan_date, scenario, feeder, net, net_load, approved_plans,
-            accepted_reduction_kw, nb["v_limit_pct"], nb["nominal_v_ln"], modbus_host, modbus_port, rng,
-            dr_window=(window_start, window_end), pre_outage=(notice_ts, outage_start), load_adjust=auto_adjust,
-        )
         write_dr_window_events(conn, "load_shedding", dr_result, window_start, window_end, len(accepted_reduction_kw))
         write_auto_dr_events(conn, "load_shedding", auto_summary, approval_ts, window_start)
-        run_outage_day(conn, "load_shedding", plan_date, scenario, feeder, outage_start, outage_end, rng,
-                       source_run_id="load_shedding", cause="load_shedding")
 
     if args.surplus:
         # §14 "Midday overvoltage": a sunny, light-load day where rooftop PV
@@ -1238,19 +1015,18 @@ def main() -> None:
             p: approve_plan(plan, "operator-1", surplus_run_time + pd.Timedelta(hours=4))
             for p, plan in surplus_plans.items()
         }
-        init_run(conn, "surplus", True, scenario["sim"]["seed"], surplus_date,
+        init_run(conn, "surplus", True, seed, surplus_date,
                  "sim/loop.py recorded run: sunny low-demand day, midday PV export")
         persist_forecast(conn, "surplus", surplus_artifacts, nb["dt_id"])
         sfc = sum(np.array(surplus_plans[p]["forecast_p50_kw"]) for p in PHASES)
         s_adjust, s_summary = automated_dr(feeder, scenario, truth, surplus_date, sfc, weather_15min, net_load)
-        run_one_day(conn, "surplus", True, surplus_date, scenario, feeder, net, net_load, surplus_approved, {},
-                    nb["v_limit_pct"], nb["nominal_v_ln"], modbus_host, modbus_port, rng, load_adjust=s_adjust)
+        record_day("surplus", True, surplus_date, surplus_approved, {}, load_adjust=s_adjust, forecast_run_id="surplus")
         write_auto_dr_events(conn, "surplus", s_summary, surplus_run_time + pd.Timedelta(hours=4), None)
-        init_run(conn, "surplus_baseline", False, scenario["sim"]["seed"], surplus_date,
+        init_run(conn, "surplus_baseline", False, seed, surplus_date,
                  "sim/loop.py recorded run: sunny low-demand day, battery disabled")
-        run_one_day(conn, "surplus_baseline", False, surplus_date, scenario, feeder, net, net_load, None, {},
-                    nb["v_limit_pct"], nb["nominal_v_ln"], modbus_host, modbus_port, rng)
+        record_day("surplus_baseline", False, surplus_date, None, {}, forecast_run_id="surplus")
 
+    devices.close()
     conn.close()
 
 

@@ -63,7 +63,8 @@ from world.weather import fetch_scenario_weather, to_15min
 from world.outages import generate_outage_schedule, to_dataframe as outages_to_dataframe
 from gateway.network_model import build_pandapower_net, run_power_flow, compute_phase_limits, get_bus_index
 from gateway.forecast.run import forecast_phase_net_load_kw
-from gateway.orchestrator.planner_shave import plan_day, live_setpoint, in_window, DISCHARGE_WINDOW_IST
+from gateway.orchestrator.planner_shave import plan_day, in_window, DISCHARGE_WINDOW_IST
+from gateway.controller import SOC_BACKUP_FLOOR, BlockSpec, live_decision, pre_outage_reserve_soc
 from gateway.outage import MAX_CURRENT_A_BY_PRIORITY, PRIORITY_BY_CRITICAL_CLASS
 from cloud.dr_engine.linucb import LinUCB, choose_level, build_feature_vector, LEVELS
 from sim.personas import respond_to_offer
@@ -75,8 +76,6 @@ IST = pd.Timedelta(hours=5, minutes=30)
 DT_H = 0.25
 
 SOC_MIN, SOC_MAX, EFF = 0.15, 0.90, 0.92
-SOC_BACKUP_FLOOR = 0.05       # in an outage the backup circuit may dig below the daily floor
-PRE_OUTAGE_SOC = 0.90
 
 TRIP_THRESHOLD_PCT = 100.0    # same fuse model as sim/loop.py
 TRIP_CONSECUTIVE = 4
@@ -387,6 +386,7 @@ def run_task(task: tuple[str, int]) -> list[dict]:
     battery = cfg["battery"]
     cap, power = battery if battery else (0.0, 0.0)
     soc = {p: 0.5 for p in PHASES}
+    block_spec = {p: BlockSpec(p, cap, power, SOC_MIN, SOC_MAX, EFF) for p in PHASES} if battery else {}
     dvdp = {}
     if battery:
         run_power_flow(net)
@@ -430,8 +430,7 @@ def run_task(task: tuple[str, int]) -> list[dict]:
         if shed and battery:
             cut_h = (shed[2] - shed[1]).total_seconds() / 3600.0
             for p in PHASES:
-                need_kwh = 1.5 * float(backup_cap[p].sum()) * cut_h
-                reserve_soc[p] = min(PRE_OUTAGE_SOC, SOC_BACKUP_FLOOR + need_kwh / (cap * EFF))
+                reserve_soc[p] = pre_outage_reserve_soc(block_spec[p], float(backup_cap[p].sum()), cut_h)
 
         # ---- Day-ahead: battery plan, then DR on the residual it can't cover.
         plan = {p: plan_day(fc[p]["p50"], local_h, cap, power, soc[p], SOC_MIN, SOC_MAX, EFF)
@@ -596,21 +595,15 @@ def run_task(task: tuple[str, int]) -> list[dict]:
                         soc[p] -= served * DT_H / EFF / cap
                         if not grid_up[p]:
                             continue
-                    vb = last_v["bus"][p]
-                    max_dis = float(np.clip((1 + v_lim - vb) / dvdp[p], 0, power))
-                    max_ch = float(np.clip((vb - (1 - v_lim)) / dvdp[p], 0, power))
-                    if pre_outage and soc[p] < reserve_soc[p]:
-                        sp = -max_ch  # top up to what the backup premises will need through the cut
-                    else:
-                        # Pre-outage raises the floor to that reserve (§9.3) and keeps
-                        # shaving with the rest; holding the whole block gave up the
-                        # evening peak that arrives before the cut.
-                        floor = max(SOC_MIN, reserve_soc[p]) if pre_outage else SOC_MIN
-                        sp, _ = live_setpoint(i, measured, fc[p]["p50"], bias[p], local_h, soc[p], cap, power,
-                                              floor, SOC_MAX, EFF)
-                        if last_v["far"][p] > 1 + v_lim and soc[p] < SOC_MAX:
-                            sp = min(sp, -max_ch)  # absorb export pushing the far end over the limit
-                    sp = float(np.clip(sp, -max_ch, max_dis))
+                    # LEO's decision: the same code the edge gateway runs live
+                    # (gateway/controller.py), fed only what its devices report.
+                    decision, bias[p] = live_decision(
+                        i, load_kw=measured, busbar_v_pu=last_v["bus"][p], far_end_v_pu=last_v["far"][p],
+                        soc=soc[p], block=block_spec[p], dvdp_pu_per_kw=dvdp[p], v_limit_pu=v_lim,
+                        forecast_p50_kw=fc[p]["p50"], bias_kw=bias[p], local_hour=local_h,
+                        pre_outage=pre_outage, reserve_soc=reserve_soc[p])
+                    sp = decision.setpoint_kw
+                    # BMS (world side): clip to what the pack can deliver or absorb.
                     if sp > 0:
                         sp = min(sp, (soc[p] - SOC_MIN) * cap * EFF / DT_H)
                         soc[p] -= sp * DT_H / EFF / cap
@@ -618,7 +611,6 @@ def run_task(task: tuple[str, int]) -> list[dict]:
                         sp = -min(-sp, (SOC_MAX - soc[p]) * cap / EFF / DT_H)
                         soc[p] -= sp * DT_H * EFF / cap
                     setp[p] = sp
-                    bias[p] = measured - float(fc[p]["p50"][i])
                     hb = hour_bucket[i]
                     if sp > 0:
                         m["discharge_kwh_by_hour"][hb] += sp * DT_H

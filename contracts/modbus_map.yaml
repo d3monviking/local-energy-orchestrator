@@ -38,3 +38,20 @@ behaviour:
     On grid loss the block opens its grid relay automatically and serves
     only the backup port. This is not an orchestrator decision; the
     orchestrator observes grid_present going to 0 and adjusts accounting.
+  gateway_watchdog: >
+    The gateway writes watchdog_s = 1800 (INVERTER_WATCHDOG_S) with every
+    setpoint: one missed 15-minute write keeps the last setpoint, a dead
+    gateway leaves the block idle after two.
+
+# Simulation hooks, mocks/modbus_battery.py only. NOT part of the device
+# contract: the gateway never touches them. sim/field.py uses them to play
+# the physical world (pack size, grid at the terminals, backup draw, time).
+simulation_hooks:
+  40100: {name: sim_stepped,          values: {0: free_running_on_clock, 1: stepped_by_simulator},
+          note: "stepped: physics advances only on 40106, watchdog counts simulated seconds"}
+  40101: {name: sim_capacity_kwh_x10, type: uint16}
+  40102: {name: sim_power_kw_x10,     type: uint16}
+  40103: {name: sim_soc_x1000,        type: uint16, note: "write sets the state of charge"}
+  40104: {name: sim_grid_present,     values: {0: absent, 1: present}}
+  40105: {name: sim_backup_demand_w,  type: uint16, note: "what the backup premises would draw"}
+  40106: {name: sim_advance_s,        type: uint16, note: "write N: integrate N simulated seconds now"}
