@@ -167,6 +167,8 @@ Recommendations are stored today as structured JSON (recommendation ID, DT, phas
 
 The whole system runs locally with one `docker compose up`: mock field devices, the edge gateway, the operator cloud and the web consoles, against a **closed-loop simulator**. All models execute for real; the consoles replay recorded runs from Postgres.
 
+Every LEO decision in a recorded run is made by the running edge gateway (`gateway/service.py`), not by the simulator. The simulator (`sim/loop.py`) owns the truth: loads, PV, outages, the three-phase power flow and fuse trips. The gateway sees that world only through real interfaces (`sim/field.py`). Sensor uplinks, including the busbar CT, and power-fail/restore events arrive over MQTT. It commands the inverters and the backup premise meters over Modbus. A DISCOM notice reaches it over REST. The clock is stepped in lockstep: the simulator publishes, jumps the clock, waits for the gateway's `leo/gateway/ack`, then advances the inverter physics. Baselines run the gateway in shadow mode, where it ingests but does not command. The gateway's live controller (`gateway/controller.py`) is the same code the year-long sweep (`eval/sweep.py`) uses, so the recorded demo and the headline numbers come from one engine.
+
 ### Recorded scenarios
 
 | Recording | What it shows |
@@ -395,9 +397,15 @@ pip install -r requirements.txt
 
 export POSTGRES_PORT=5433
 python -m world.build                         # neighbourhood, households, sensors, batteries → Postgres
-python -m sim.loop                            # records all six scenarios (trains the forecast, ~10+ min)
+python -m sim.loop                            # records all six scenarios through the gateway (needs the stack up)
 python -m cloud.settlement.run_settlement     # next-morning settlement for the peak day
 python -m cloud.recommendations               # DISCOM recommendations
+```
+
+Unit tests (controller, ingest validation, inverter mock):
+
+```bash
+pip install pytest && PYTHONPATH=. pytest tests
 ```
 
 ### 3. Open the consoles
@@ -424,12 +432,13 @@ python -m eval.economics --sweep-id year      # prices the sweep with economics.
 ```
 .
 ├── world/          Simulated neighbourhood: OSM feeder, households, PV, weather, outages, IRT library
-├── sim/            Closed-loop simulator that records the demo scenarios into Postgres
-├── gateway/        Edge gateway: day-ahead forecast and plan, live correction, outage handling
+├── sim/            Closed-loop simulated world (loop.py) and its device side (field.py), stepped with the gateway
+├── gateway/        Edge gateway service (MQTT/Modbus): day-ahead forecast and plan, live correction, outage handling
 ├── cloud/          FastAPI API, DR engine (LinUCB), settlement, recommendations, explainability
 ├── mocks/          Mock field devices: Modbus batteries and meters, SMS service, India Energy Stack
 ├── contracts/      Database schema (ddl.sql), Modbus register map, MQTT topics, JSON schemas
 ├── eval/           Year-sampled sweep, reliability metrics and unit economics
+├── tests/          pytest unit tests
 ├── web/            Next.js app: operator console, DISCOM dashboard, citizen app
 ├── docs/
 │   ├── diagrams/   Architecture and results figures (Mermaid sources, SVG, PNG)

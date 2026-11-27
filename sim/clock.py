@@ -5,9 +5,11 @@ Every other service reads time from here, never from the system clock
 minutes and what makes replay deterministic.
 
 Endpoints: GET /now, POST /speed, POST /jump, POST /pause.
-Side effect: publishes `leo/clock/tick` on MQTT every real-time TICK_PERIOD_S,
-carrying the current simulated time, so any service can stay in sync
-without polling /now.
+Side effect: publishes `leo/clock/tick` on MQTT every real-time TICK_PERIOD_S
+while running, carrying the current simulated time, so any service can
+stay in sync without polling /now. A paused clock is silent; a jump
+publishes the new time at once. That is how sim/loop.py steps the world
+in lockstep with the edge gateway: pause, then jump interval by interval.
 """
 
 from __future__ import annotations
@@ -98,9 +100,17 @@ async def _tick_loop() -> None:
         elapsed = now_real - last
         last = now_real
         sim_now = state.advance(elapsed)
-        if _mqtt_client is not None:
-            payload = sim_now.isoformat()
-            _mqtt_client.publish(TICK_TOPIC, payload, qos=0, retain=True)
+        if not state.snapshot()["paused"]:
+            _publish(sim_now)
+
+
+def _publish(sim_now: datetime) -> None:
+    if _mqtt_client is None:
+        return
+    try:
+        _mqtt_client.publish(TICK_TOPIC, sim_now.isoformat(), qos=1, retain=True).wait_for_publish(timeout=5)
+    except (RuntimeError, ValueError) as exc:  # broker down: time still moved, nobody heard
+        print(f"[clock] tick not published ({exc})")
 
 
 @asynccontextmanager
@@ -157,6 +167,7 @@ def jump(req: JumpRequest) -> dict:
         state.jump_by(req.delta_seconds)
     else:
         raise ValueError("jump requires either 'to' or 'delta_seconds'")
+    _publish(state.now())
     return state.snapshot()
 
 

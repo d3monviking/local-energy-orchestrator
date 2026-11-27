@@ -46,9 +46,6 @@ services:
     build: { context: ., dockerfile: mocks/Dockerfile }
     command: ["python", "modbus_meters.py"]
     ports: ["5021:5021"]
-    environment:
-      POSTGRES_HOST: postgres
-    depends_on: [postgres]
 
   mock-sms:
     build: { context: ., dockerfile: mocks/Dockerfile }
@@ -58,13 +55,19 @@ services:
       CLOCK_URL: http://clock:8010
     depends_on: [clock]
 
+  # The edge gateway: ingests sensors (MQTT), commands the inverters and
+  # backup meters (Modbus), runs C7/C9 on clock ticks. See gateway/service.py.
   gateway:
     build: { context: ., dockerfile: gateway/Dockerfile }
     ports: ["8020:8020"]
     environment:
       POSTGRES_HOST: postgres
       MQTT_HOST: mosquitto
-    depends_on: [postgres, mosquitto, mock-modbus, clock]
+      INVERTER_HOST: mock-modbus
+      INVERTER_PORT: "5020"
+      METER_HOST: mock-modbus-meters
+      METER_PORT: "5021"
+    depends_on: [postgres, mosquitto, mock-modbus, mock-modbus-meters, clock]
 
   cloud:
     build: { context: ., dockerfile: cloud/Dockerfile }
