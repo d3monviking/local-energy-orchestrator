@@ -41,6 +41,7 @@ from world.outages import generate_outage_schedule, to_dataframe as outages_to_d
 from world.irt_library import build_library
 from world.weather import fetch_scenario_weather, to_15min
 from gateway.outage import register_backup_premises
+from contracts.migrate import migrate
 
 MODULE_DIR = Path(__file__).parent
 OUTPUT_DIR = MODULE_DIR / "data" / "generated"
@@ -256,6 +257,7 @@ def build(scenario: dict | None = None, skip_db: bool = False) -> dict:
         print("writing static registry to Postgres...")
         conn = db_connect()
         try:
+            migrate(conn)  # bring the schema past ddl.sql (contracts/migrations/)
             write_static_registry(conn, scenario, feeder, appliances, household_truth)
         finally:
             conn.close()

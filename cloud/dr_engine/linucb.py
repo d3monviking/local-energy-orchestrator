@@ -198,7 +198,6 @@ def choose_level(
 
 
 if __name__ == "__main__":
-    import numpy as np
 
     from sim.personas import respond_to_offer
 

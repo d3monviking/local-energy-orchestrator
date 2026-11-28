@@ -132,7 +132,6 @@ if __name__ == "__main__":
     from world.pv_truth import assign_pv_truth_params, generate_true_pv
     from world.weather import fetch_scenario_weather, to_15min
     from world.irt_library import build_library
-    import numpy as np
 
     scenario = load_scenario()
     feeder = build_feeder(scenario)
@@ -189,7 +188,7 @@ if __name__ == "__main__":
     print(f"  IRT similarity blend  RMSE: {np.mean(blend_errors):.4f}")
     print(f"  flat all-day average  RMSE: {np.mean(mean_baseline_errors):.4f}")
     print(f"  random single day     RMSE: {np.mean(random_baseline_errors):.4f}")
-    print(f"  (lower is better; the blend should beat both naive baselines)")
+    print("  (lower is better; the blend should beat both naive baselines)")
 
     example_target = daily_features.iloc[len(daily_features) // 2]
     _, chosen = blend_reference_trajectory(example_target, daily_features, irt_library, phase)

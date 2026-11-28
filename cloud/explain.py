@@ -333,7 +333,7 @@ async def action_log(conn, run_id: str) -> list[dict]:
 
     def classify(r):
         phase = r["block_id"].replace("BATT-", "")
-        a, p = r["actual_kw"], r["planned_kw"]
+        a = r["actual_kw"]
         rule, mode = r["rule_triggered"], r["mode"]
         if mode == "backup":
             return None

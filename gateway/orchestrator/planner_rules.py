@@ -25,7 +25,6 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Optional
 
 LOCAL_UTC_OFFSET_HOURS = 5.5  # IST; the neighbourhood's timezone (neighbourhood.timezone)
 

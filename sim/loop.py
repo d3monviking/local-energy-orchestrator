@@ -44,7 +44,7 @@ from gateway.network_model import (
 from gateway.forecast.load_model import build_features, FEATURE_COLUMNS, train as train_load_model
 from gateway.forecast.pv_model import unit_pv_output_kw, fit_k, compute_clear_midday_mask, pass0_initial_load_estimate
 from gateway.forecast.run import ForecastInputs, run_day_ahead_plan, approve_plan
-from cloud.dr_engine.linucb import LinUCB, choose_level, build_feature_vector, LEVELS
+from cloud.dr_engine.linucb import LinUCB, build_feature_vector, LEVELS
 from cloud.dr_engine.selection import run_dr_event, ensure_default_consent
 from sim.personas import respond_to_offer
 from sim import measure

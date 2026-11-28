@@ -13,7 +13,6 @@ as a real inverter would be.
 
 from __future__ import annotations
 
-from datetime import date as date_cls
 from datetime import datetime, time, timedelta, timezone
 
 import numpy as np
