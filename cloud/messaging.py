@@ -35,7 +35,7 @@ CHANNELS = ("sms", "app", "ivr")
 SMS_TIMEOUT_S = 3.0
 
 
-def sms_url() -> str:
+def default_sms_url() -> str:
     return os.environ.get("SMS_URL", "http://localhost:8012")
 
 
@@ -83,9 +83,11 @@ def notify(
     at,
     channels: Iterable[str] = ("sms", "app"),
     dedupe_key: str | None = None,
+    sms_url: str | None = None,
 ) -> list[int]:
     """Send `kind` to `audience` at simulated time `at`. Returns the ids of
-    the message rows created (none for households/channels deduped away)."""
+    the message rows created (none for households/channels deduped away).
+    `sms_url` overrides the SMS_URL environment variable."""
     channels = tuple(channels)
     bad = [c for c in channels if c not in CHANNELS]
     if bad:
@@ -104,6 +106,7 @@ def notify(
         fields = _fields_for(payload, household_id)
         outbox.append((household_id, lang, render(kind, lang, fields, sent_at), psycopg2.extras.Json(_jsonable(fields))))
 
+    sms_base = sms_url or default_sms_url()
     created: list[int] = []
     sms_down: str | None = None   # once the SMS service is unreachable, don't wait on it per household
     session = requests.Session()
@@ -132,7 +135,7 @@ def notify(
                         cur.execute("UPDATE message SET error = %s WHERE id = %s", (sms_down, message_id))
                         continue
                     try:
-                        resp = session.post(f"{sms_url()}/send", timeout=SMS_TIMEOUT_S, json={
+                        resp = session.post(f"{sms_base}/send", timeout=SMS_TIMEOUT_S, json={
                             "to": household_id, "channel": "sms", "body": body, "sent_at": sent_at.isoformat(),
                             "meta": {"run_id": run_id, "kind": kind, "message_id": message_id}})
                         resp.raise_for_status()
@@ -150,3 +153,21 @@ def notify(
     finally:
         session.close()
     return created
+
+
+def record_reply(conn, run_id: str, household_id: str, dedupe_key: str, reply: str, at) -> int:
+    """A household's reply (SMS "YES"/"STOP", or a tap in the app) to the
+    message sent under `dedupe_key`. Stored on that household's message
+    rows; returns how many were updated (0 = no such message). Acting on
+    the reply (accepting an offer, an override) is the caller's job.
+    Commits."""
+    replied_at = pd.Timestamp(at)
+    if replied_at.tzinfo is None:
+        raise ValueError("`at` must be timezone-aware (simulated UTC time)")
+    with conn.cursor() as cur:
+        cur.execute("""UPDATE message SET reply = %s, replied_at = %s
+                       WHERE run_id = %s AND household_id = %s AND dedupe_key = %s""",
+                    (reply.strip(), replied_at.to_pydatetime(), run_id, household_id, dedupe_key))
+        n = cur.rowcount
+    conn.commit()
+    return n

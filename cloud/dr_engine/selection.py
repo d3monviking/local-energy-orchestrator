@@ -5,8 +5,8 @@ Turns "we need N kW off phase R, 19:00-21:00" into an actual list of SMS
 offers: filters who may be asked, carves out a random holdout for
 verification, scores everyone else with cloud/dr_engine/linucb.py, ranks
 by expected profit with the 30-day fairness override, and sends offers
-(via mocks/sms_service — the real interface a deployment's SMS gateway
-sits behind) until the target is met or the eligible pool runs out.
+through cloud/messaging.notify (SMS + the household's app feed) until the
+target is met or the eligible pool runs out.
 
 Consent storage/enforcement for `dr_offers` lives here (Architecture
 v3.0 §13, C14's split), not in cloud/api.py's HTTP surface yet — there's
@@ -17,11 +17,10 @@ no UI need for an endpoint until the citizen app's consent screen
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime
-
-import requests
+from datetime import datetime, timedelta
 
 from cloud.dr_engine.linucb import LinUCB, choose_level
+from cloud.messaging import notify
 
 MONTHLY_OFFER_CAP = 4
 MIN_DAYS_SINCE_LAST_OFFER = 3
@@ -176,8 +175,11 @@ def run_dr_event(
 ) -> dict:
     """Build Spec §11.3 steps 1-4, end to end: eligibility, 10% holdout,
     per-household level choice, rank (fairness first, then profit),
-    send offers over mocks/sms_service until predicted reduction meets
-    `target_kw` with margin or the pool is exhausted. Writes `dr_event`
+    choose offers until predicted reduction meets `target_kw` with margin
+    or the pool is exhausted, and send them through cloud/messaging at
+    `window_start - hours_notice` (simulated time). An offer counts as
+    sent only if its SMS was delivered: SMS is the channel that reaches
+    every household; the app feed is extra. Writes `dr_event`
     and `dr_offer` rows; returns a summary for the caller (sim/loop.py)
     to log and for the operator console to display.
 
@@ -239,42 +241,54 @@ def run_dr_event(
         (run_id, event_id, phase, window_start, window_end, target_kw, round(v_rupees_per_kwh * 100)),
     )
 
-    sent = []
+    # Choose who is offered, exactly as before: in ranked order until the
+    # predicted reduction covers the target with 10% margin. Holdout
+    # households are never offered.
+    offered: dict[str, float] = {}
     predicted_kw_total = 0.0
     for hh, choice in scored:
-        is_holdout = hh.household_id in holdout_ids
-        predicted_kwh = choice["predicted_kwh"]
-        level = choice["level"]
+        if hh.household_id not in holdout_ids and predicted_kw_total < target_kw * 1.1:
+            offered[hh.household_id] = choice["level"]
+            predicted_kw_total += choice["predicted_kwh"] / max(duration_hours, 1e-6)
+    cur.close()
 
-        if not is_holdout and predicted_kw_total < target_kw * 1.1:
-            message = _offer_message(level, predicted_kwh, v_rupees_per_kwh, window_start, window_end)
-            try:
-                resp = requests.post(
-                    f"{sms_url}/send",
-                    json={"to": hh.household_id, "channel": "sms", "body": message,
-                          "meta": {"event_id": event_id, "level": level}},
-                    timeout=3,
-                )
-                sent_at = resp.json().get("sent_at")
-            except requests.RequestException:
-                sent_at = datetime.utcnow().isoformat()
-            predicted_kw_total += predicted_kwh / max(duration_hours, 1e-6)
-        else:
-            message = None
-            sent_at = None
-
+    # Record every decision first. Only households whose dr_offer row is new
+    # are messaged: re-running an event that already exists (sim/loop.py
+    # does on partial recordings) must not offer anyone again - least of
+    # all its holdout, which would break the verification design.
+    send_at = window_start - timedelta(hours=hours_notice)
+    cur = conn.cursor()
+    new_rows: set[str] = set()
+    for hh, choice in scored:
         cur.execute(
             """INSERT INTO dr_offer (run_id, event_id, household_id, level, predicted_kwh,
                    sent_at, channel, is_holdout)
-               VALUES (%s,%s,%s,%s,%s,%s,%s,%s)
-               ON CONFLICT (run_id, event_id, household_id) DO NOTHING""",
-            (run_id, event_id, hh.household_id, level, predicted_kwh,
-             sent_at, "sms" if sent_at else None, is_holdout),
+               VALUES (%s,%s,%s,%s,%s,NULL,NULL,%s)
+               ON CONFLICT (run_id, event_id, household_id) DO NOTHING
+               RETURNING household_id""",
+            (run_id, event_id, hh.household_id, choice["level"], choice["predicted_kwh"],
+             hh.household_id in holdout_ids),
         )
-        sent.append({
-            "household_id": hh.household_id, "level": level, "predicted_kwh": predicted_kwh,
-            "is_holdout": is_holdout, "sent": sent_at is not None, "x": choice["x"],
-        })
+        if cur.fetchone() is not None:
+            new_rows.add(hh.household_id)
+    conn.commit()
+
+    to_send = {h: lvl for h, lvl in offered.items() if h in new_rows}
+    delivered = send_offers(conn, run_id, event_id, to_send, window_start, window_end, send_at, sms_url=sms_url)
+    for hh_id, ok in delivered.items():
+        if ok and hh_id in to_send:
+            cur.execute("""UPDATE dr_offer SET sent_at = %s, channel = 'sms'
+                           WHERE run_id = %s AND event_id = %s AND household_id = %s""",
+                        (send_at, run_id, event_id, hh_id))
+
+    sent = [{
+        "household_id": hh.household_id, "level": choice["level"], "predicted_kwh": choice["predicted_kwh"],
+        "is_holdout": hh.household_id in holdout_ids,
+        "sent": hh.household_id in to_send and bool(delivered.get(hh.household_id)), "x": choice["x"],
+    } for hh, choice in scored]
+    if len(new_rows) < len(scored):
+        print(f"  dr_event {event_id}: {len(scored) - len(new_rows)} household(s) already had an offer "
+              f"row for this event; not re-sent")
 
     conn.commit()
     cur.close()
@@ -285,8 +299,24 @@ def run_dr_event(
     }
 
 
-def _offer_message(level: float, predicted_kwh: float, v_rupees_per_kwh: float, start: datetime, end: datetime) -> str:
-    window = f"{start.strftime('%-I%p').lower()}-{end.strftime('%-I%p').lower()}"
-    if level == 0:
-        return f"Please help avoid a local power cut tonight by cutting back {window}."
-    return f"Earn Rs {round(level)} if you switch off your cooler or pump {window} tonight."
+def offer_dedupe_key(event_id: str) -> str:
+    return f"offer-{event_id}"
+
+
+def send_offers(conn, run_id: str, event_id: str, levels: dict[str, float], window_start, window_end,
+                at, sms_url: str | None = None) -> dict[str, bool]:
+    """Send each household its offer (`levels`: household_id -> rupees,
+    0 = appeal) through cloud/messaging. Returns household_id -> whether
+    its SMS was delivered. Safe to call again: each household gets an
+    event's offer once."""
+    if not levels:
+        return {}
+    notify(conn, run_id, list(levels), "dr_offer",
+           {"start": window_start, "end": window_end,
+            "per_household": {h: {"level_rs": lvl} for h, lvl in levels.items()}},
+           at=at, dedupe_key=offer_dedupe_key(event_id), sms_url=sms_url)
+    with conn.cursor() as cur:
+        cur.execute("""SELECT household_id, delivered FROM message
+                       WHERE run_id = %s AND channel = 'sms' AND dedupe_key = %s""",
+                    (run_id, offer_dedupe_key(event_id)))
+        return dict(cur.fetchall())

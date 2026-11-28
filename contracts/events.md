@@ -78,6 +78,28 @@ What it does:
 
 Times are shown in IST. "Today" / "tomorrow" are relative to `at`. English stays within one 160-character SMS; Kannada runs 1–3 segments.
 
-### Event → alert job (B1b, next)
+### Event → alert job: `cloud/alerts.py` (B1b)
 
-Reads new `event` rows of alertable kinds (table above) and calls `notify` with `dedupe_key = "event-<id>"`. The gateway and simulator therefore only write events; they never decide who gets told what.
+**Status: built.** Producers (gateway, simulator) only write `event` rows; this job decides who hears what and sends through `notify` with `dedupe_key = "event-<id>"`, so it is safe to run repeatedly:
+
+```bash
+POSTGRES_PORT=5433 python -m cloud.alerts --all            # after recording
+POSTGRES_PORT=5433 python -m cloud.alerts --all --follow   # keep polling
+```
+
+| event kind | who | sent at (simulated) |
+|---|---|---|
+| `load_shedding_notice` | everyone | the event (the notice) |
+| `grid_loss` | event scope, **minus** backup premises in a `backup_start` at the same moment | the event |
+| `backup_start` | each premise in `payload.premises`; limit = `allocated_kw` (0 → "backup not available for you now") | the event |
+| `restore` | `payload.household_ids` | the event |
+| `grid_return` | event scope, **minus** premises restored within the next hour (they hear `restore` instead) | the event |
+| `overload_trip` | event scope | the event |
+| `dr_auto_shift` | `payload.pump_homes` | the event (23:30 IST the night before: "tomorrow") |
+| `dr_auto_ac` | `payload.ac_homes` | **3 h before** the window, ahead of the 2 h pre-cool, so homes can reply STOP |
+
+Scopes: `upstream` / `all` → everyone, `phase:X` → that phase, `local:<bus>` → that bus. Other kinds (`power_fail`, `backup_end`, `dr_event_start/end`, `citizen_report`, `alert_sent`) are not sent to households.
+
+**DR offers** are sent by the DR engine itself (`cloud/dr_engine/selection.run_dr_event`) through `notify` (kind `dr_offer`, dedupe key `offer-<event_id>`), at `window_start − hours_notice`. `dr_offer.sent_at` is set only when the SMS was delivered. Re-running an event that already has offer rows (a partial `sim.loop` recording does) messages nobody new, so the holdout is never offered. The alert job also gives every offer recorded as sent its message, which covers runs whose offers `sim/loop.py` copies from `normal`. It repairs pre-B1b offers whose `sent_at` was the SMS mock's wall clock to `window_start − 20 h`.
+
+**Replies:** `cloud.messaging.record_reply(conn, run_id, household_id, dedupe_key, reply, at)` stores a YES/STOP on the message. Acting on it (accept the offer, override the event) is the household API's job (B2).

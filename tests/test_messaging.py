@@ -1,17 +1,12 @@
 """cloud/message_templates.py and cloud/messaging.notify (contracts/events.md, C-4).
 
 Template tests are pure. notify tests need Postgres (POSTGRES_HOST/PORT);
-they skip when it isn't reachable, e.g. in CI. They create a throwaway
-run and delete it afterwards, and talk to an in-process fake SMS server.
+they skip when it isn't reachable, e.g. in CI (fixtures in tests/conftest.py).
 """
-
-import json
-import os
-import threading
-from http.server import BaseHTTPRequestHandler, HTTPServer
 
 import pytest
 
+from tests.conftest import drop_run, make_run
 from cloud.message_templates import (
     TEMPLATES, TemplateError, fmt_day, fmt_hour, fmt_time, render, sms_segments,
 )
@@ -92,59 +87,10 @@ RUN = "zz_test_messaging"
 
 
 @pytest.fixture(scope="module")
-def conn():
-    psycopg2 = pytest.importorskip("psycopg2")
-    try:
-        c = psycopg2.connect(
-            host=os.environ.get("POSTGRES_HOST", "localhost"), port=int(os.environ.get("POSTGRES_PORT", "5432")),
-            user=os.environ.get("POSTGRES_USER", "leo"), password=os.environ.get("POSTGRES_PASSWORD", "leo"),
-            dbname=os.environ.get("POSTGRES_DB", "leo"), connect_timeout=2)
-    except psycopg2.OperationalError:
-        pytest.skip("Postgres not reachable")
-    with c.cursor() as cur:
-        cur.execute("SELECT count(*) FROM household")
-        if cur.fetchone()[0] == 0:
-            pytest.skip("no world built in this database")
-    from contracts.migrate import migrate
-    migrate(c, verbose=False)
-    with c.cursor() as cur:
-        cur.execute("DELETE FROM run WHERE run_id = %s", (RUN,))
-        cur.execute("""INSERT INTO run (run_id, scenario, leo_enabled, seed, sim_start, sim_end, notes)
-                       VALUES (%s, 'test', TRUE, 0, '2026-04-27T00:00Z', '2026-04-28T00:00Z', 'tests/test_messaging.py')""",
-                    (RUN,))
-    c.commit()
-    yield c
-    with c.cursor() as cur:
-        cur.execute("DELETE FROM run WHERE run_id = %s", (RUN,))   # cascades to message
-    c.commit()
-    c.close()
-
-
-class _FakeSms(BaseHTTPRequestHandler):
-    received: list = []
-
-    def do_POST(self):
-        body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
-        _FakeSms.received.append(body)
-        out = json.dumps({"id": len(_FakeSms.received), "sent_at": body.get("sent_at")}).encode()
-        self.send_response(200)
-        self.send_header("Content-Type", "application/json")
-        self.send_header("Content-Length", str(len(out)))
-        self.end_headers()
-        self.wfile.write(out)
-
-    def log_message(self, *args):
-        pass
-
-
-@pytest.fixture()
-def sms(monkeypatch):
-    server = HTTPServer(("127.0.0.1", 0), _FakeSms)
-    threading.Thread(target=server.serve_forever, daemon=True).start()
-    _FakeSms.received = []
-    monkeypatch.setenv("SMS_URL", f"http://127.0.0.1:{server.server_port}")
-    yield _FakeSms.received
-    server.shutdown()
+def conn(db):
+    make_run(db, RUN, "tests/test_messaging.py")
+    yield db
+    drop_run(db, RUN)
 
 
 def _rows(conn, kind):

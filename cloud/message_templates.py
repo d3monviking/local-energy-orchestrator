@@ -18,11 +18,11 @@ Fields by kind (all times ISO 8601 / datetime, timezone-aware):
 
     load_shedding_notice  start, end
     grid_loss             expected_end (optional), planned (bool, default False)
-    backup_start          limit_a, limit_kw          (per premise)
+    backup_start          limit_a, limit_kw          (per premise; 0 = nothing available for it now)
     restore               —                          (this premise is back on the grid)
     grid_return           —
     overload_trip         —
-    dr_auto_shift         slot_ist (decimal IST hour, e.g. 10.75)
+    dr_auto_shift         slot_ist (decimal IST hour, e.g. 10.75), day (optional: the date it runs; default today)
     dr_auto_ac            start, end, payment_rs
     dr_offer              start, end, level_rs (0 = an appeal, no payment)
 """
@@ -120,7 +120,11 @@ def _grid_loss(f, at, lang):
 
 def _backup_start(f, at, lang):
     _need(f, "backup_start", "limit_a", "limit_kw")
-    a, kw = f"{float(f['limit_a']):g}", f"{float(f['limit_kw']):.1f}"
+    if float(f["limit_kw"]) <= 0:  # energy is short and higher-priority premises come first
+        if lang == "en":
+            return "LEO: Grid power is off. Backup power is not available for your premises right now. We will message you when power returns."
+        return "LEO: ಗ್ರಿಡ್ ವಿದ್ಯುತ್ ಇಲ್ಲ. ಈಗ ನಿಮ್ಮ ಆವರಣಕ್ಕೆ ಬ್ಯಾಕಪ್ ವಿದ್ಯುತ್ ಲಭ್ಯವಿಲ್ಲ. ವಿದ್ಯುತ್ ಬಂದಾಗ ತಿಳಿಸುತ್ತೇವೆ."
+    a, kw = f"{float(f['limit_a']):.0f}", f"{float(f['limit_kw']):.1f}"
     if lang == "en":
         return f"LEO: Grid power is off. You are on LEO backup power. Please keep use under {a} A (about {kw} kW)."
     return f"LEO: ಗ್ರಿಡ್ ವಿದ್ಯುತ್ ಇಲ್ಲ. ನೀವು LEO ಬ್ಯಾಕಪ್ ವಿದ್ಯುತ್‌ನಲ್ಲಿದ್ದೀರಿ. ದಯವಿಟ್ಟು ಬಳಕೆಯನ್ನು {a} A (ಸುಮಾರು {kw} kW) ಒಳಗೆ ಇರಿಸಿ."
@@ -147,9 +151,10 @@ def _overload_trip(f, at, lang):
 def _dr_auto_shift(f, at, lang):
     _need(f, "dr_auto_shift", "slot_ist")
     slot = fmt_hour(float(f["slot_ist"]), lang)
+    day = fmt_day(f["day"], at, lang) if f.get("day") is not None else ("today" if lang == "en" else "ಇಂದು")
     if lang == "en":
-        return f"LEO: Your pump will run at {slot} today on neighbourhood solar, not in the evening. Reply STOP to run it as usual."
-    return f"LEO: ಇಂದು ನಿಮ್ಮ ಪಂಪ್ ಸಂಜೆಯ ಬದಲು {slot} ಕ್ಕೆ ನೆರೆಹೊರೆಯ ಸೌರ ವಿದ್ಯುತ್‌ನಲ್ಲಿ ಓಡುತ್ತದೆ. ಎಂದಿನಂತೆ ಓಡಿಸಲು STOP ಎಂದು ಉತ್ತರಿಸಿ."
+        return f"LEO: Your pump will run at {slot} {day} on neighbourhood solar, not in the evening. Reply STOP to run it as usual."
+    return f"LEO: {day} ನಿಮ್ಮ ಪಂಪ್ ಸಂಜೆಯ ಬದಲು {slot} ಕ್ಕೆ ನೆರೆಹೊರೆಯ ಸೌರ ವಿದ್ಯುತ್‌ನಲ್ಲಿ ಓಡುತ್ತದೆ. ಎಂದಿನಂತೆ ಓಡಿಸಲು STOP ಎಂದು ಉತ್ತರಿಸಿ."
 
 
 def _dr_auto_ac(f, at, lang):
