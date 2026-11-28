@@ -121,7 +121,6 @@ def stream2_discharge_rebate(
 
 if __name__ == "__main__":
     import numpy as np
-    import pandas as pd
 
     ts = pd.Timestamp("2026-08-29 13:00:00Z")
     dispatch_df = pd.DataFrame([

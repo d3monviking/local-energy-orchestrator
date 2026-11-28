@@ -16,9 +16,8 @@ no UI need for an endpoint until the citizen app's consent screen
 
 from __future__ import annotations
 
-import json
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import datetime
 
 import requests
 

@@ -91,7 +91,6 @@ def _connect_mqtt() -> mqtt.Client:
 
 
 async def _tick_loop() -> None:
-    global _mqtt_client
     loop = asyncio.get_event_loop()
     last = loop.time()
     while True:

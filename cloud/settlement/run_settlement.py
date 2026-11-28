@@ -176,8 +176,6 @@ def settle_normal_day(conn, plan_date: date_cls, feeder_phase_by_hhid: dict[str,
     print(f"Stream 1 (absorption): {len(stream1)} entries, {int(stream1['amount_paise'].sum()) if len(stream1) else 0} paise")
 
     deficit_kwh = _load_deficit_kwh(conn, run_id)
-    battery_daily_discharge_kwh = max(0.0, -(dispatch_df[dispatch_df["setpoint_kw"] < 0]["setpoint_kw"].sum()) * 0.25) \
-        + max(0.0, dispatch_df[dispatch_df["setpoint_kw"] > 0]["setpoint_kw"].sum() * 0.25)
     discharge_only_kwh = max(0.0, dispatch_df[dispatch_df["setpoint_kw"] > 0]["setpoint_kw"].sum() * 0.25)
     near_miss_streak = pd.Series(0, index=deficit_kwh.index)
     stream2 = stream2_discharge_rebate(

@@ -11,7 +11,6 @@ households; the citizen app and operator console both read /messages.
 from __future__ import annotations
 
 import itertools
-import os
 from datetime import datetime
 from typing import Literal
 

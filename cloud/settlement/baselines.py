@@ -103,7 +103,6 @@ def holdout_comparison(
 
 
 if __name__ == "__main__":
-    import numpy as np
     from datetime import timedelta
 
     rng = np.random.default_rng(0)
