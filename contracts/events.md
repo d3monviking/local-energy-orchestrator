@@ -37,29 +37,47 @@ All times are UTC ISO 8601 in storage and the API. The apps show IST.
 
 ## C-4 Messaging: `cloud.messaging.notify`
 
-Nothing writes to the SMS mock or to an alert table directly. Every message to a household goes through one call, owned by the Household stream:
+**Status: built (B1a).** Nothing writes to the SMS service or an alert table directly. Every message to a household goes through one call, owned by the Household stream:
 
 ```python
 from cloud.messaging import notify
 
-notify(
-    conn,
+ids = notify(
+    conn,                        # psycopg2 connection; notify COMMITS it (a sent SMS must stay recorded)
     run_id="load_shedding",
-    audience="all",              # "all" | "phase:Y" | ["HH-012", "HH-103"] | "backup_premises"
-    kind="load_shedding_notice", # template key; one per alertable event kind + "dr_offer"
-    payload={...},               # the event payload; fills the template
-    at=ts,                       # simulated time it is sent (NOT wall-clock)
-    channels=("sms", "app"),     # default both; "ivr" reserved
-) -> list[int]                   # message ids
+    audience="all",              # "all" | "phase:R|Y|B" | "backup_premises" | ["HH-012", "HH-103"]
+    kind="load_shedding_notice", # template key, see below
+    payload={"start": ..., "end": ...},   # template fields; per-household extras under "per_household": {hh_id: {...}}
+    at=ts,                       # simulated time of sending (timezone-aware), NOT wall-clock
+    channels=("sms", "app"),     # default both; "ivr" reserved (raises NotImplementedError)
+    dedupe_key="event-1234",     # optional: same key + household + channel is sent at most once per run
+)                                # -> ids of the message rows created
 ```
 
-`notify`:
-- resolves the audience to household IDs;
-- picks the household's language (`en` / `kn`; default `kn`);
-- renders the template;
-- stores one `message` row per household (table added by B1's migration: `id, run_id, household_id, kind, channel, lang, body, payload, sent_at, delivered, reply, replied_at`);
-- forwards SMS to the SMS service (mock today, real provider later) and makes app messages visible in the household's alert feed and push.
+What it does:
+1. Resolves the audience to households.
+2. Renders each household's text in its language (`household.lang`, `en` or `kn`, default `kn`). Every text is rendered before anything is sent, so a bad template fails before the first SMS leaves.
+3. Stores one `message` row per household per channel (migration `001_b_message.sql`).
+4. Sends SMS through the SMS service (`SMS_URL`). A failed send is stored as `delivered = false` with `error`, never as sent; once the service is unreachable, the rest of that call isn't retried one by one.
 
-A failed SMS send is stored as `delivered = false`, never silently treated as sent.
+`app` rows are the household's in-app alert feed.
 
-**Event → alert job:** B1 also provides a job that reads new `event` rows of alertable kinds (table above) and calls `notify`. The gateway and simulator therefore only write events; they never decide who gets told what.
+### Templates and their fields (`cloud/message_templates.py`)
+
+| kind | fields | typical audience |
+|---|---|---|
+| `load_shedding_notice` | `start, end` | `all` |
+| `grid_loss` | `expected_end` (optional), `planned` (bool) | affected phase(s) or `all` |
+| `backup_start` | `limit_a, limit_kw` (per premise, via `per_household`) | `backup_premises` |
+| `restore` | — | the premises in that restore batch |
+| `grid_return` | — | affected phase(s) or `all` |
+| `overload_trip` | — | the tripped phase |
+| `dr_auto_shift` | `slot_ist` (decimal IST hour) | the shifted pump homes |
+| `dr_auto_ac` | `start, end, payment_rs` | the AC homes in the event |
+| `dr_offer` | `start, end, level_rs` (0 = appeal, no payment) | each offered household |
+
+Times are shown in IST. "Today" / "tomorrow" are relative to `at`. English stays within one 160-character SMS; Kannada runs 1–3 segments.
+
+### Event → alert job (B1b, next)
+
+Reads new `event` rows of alertable kinds (table above) and calls `notify` with `dedupe_key = "event-<id>"`. The gateway and simulator therefore only write events; they never decide who gets told what.

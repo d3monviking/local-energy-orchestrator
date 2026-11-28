@@ -34,6 +34,10 @@ class SendRequest(BaseModel):
     channel: Literal["sms", "ivr", "email"] = "sms"
     body: str
     meta: dict = {}
+    # Simulated sending time (cloud/messaging.notify passes it). Without it
+    # the mock stamps its own clock, which during a recording is not the
+    # simulated moment the message went out.
+    sent_at: datetime | None = None
 
 
 class ReplyRequest(BaseModel):
@@ -49,7 +53,7 @@ def send(req: SendRequest) -> dict:
         "channel": req.channel,
         "body": req.body,
         "meta": req.meta,
-        "sent_at": sim_now().isoformat(),
+        "sent_at": (req.sent_at or sim_now()).isoformat(),
         "delivered": True,
         "reply": None,
         "replied_at": None,
